@@ -208,3 +208,21 @@ __marimo__/
 
 # Executables
 *.exe
+
+
+.claude
+.mcp.json
+.opencode.json
+.cursor
+.code-review-graph
+.cursorrules
+.windsurfrules
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+*.pdf
+*.pptx
+
+# implementation_plan.md
+# RESEARCH_REFERENCES.md
