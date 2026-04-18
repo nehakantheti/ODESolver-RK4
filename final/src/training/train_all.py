@@ -72,7 +72,7 @@ class TrainingOrchestrator:
         self,
         system_name: str,
         device: torch.device | None = None,
-        save_dir: str | Path = "final/trained_models",
+        save_dir: str | Path | None = None,
     ):
         """Initialise the training orchestrator.
 
@@ -80,18 +80,32 @@ class TrainingOrchestrator:
             system_name: Registry key for the ODE system.
             device: Torch device.  Auto-detects CUDA if available.
             save_dir: Directory to save trained model weights.
+                     Defaults to ``trained_models/`` relative to the
+                     project root (``final/``).
         """
         self.system = get_system(system_name)
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
-        self.save_dir = Path(save_dir)
+        # Resolve save_dir relative to project root (final/)
+        if save_dir is None:
+            project_root = Path(__file__).resolve().parent.parent.parent
+            self.save_dir = project_root / "trained_models"
+        else:
+            self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(
             "TrainingOrchestrator: system='%s', device=%s, save_dir='%s'",
             system_name, self.device, self.save_dir,
         )
+        if self.device.type == "cuda":
+            gpu_props = torch.cuda.get_device_properties(self.device)
+            logger.info(
+                "GPU: %s | VRAM: %.1f GB | Compute: %d.%d",
+                gpu_props.name, gpu_props.total_memory / 1e9,
+                gpu_props.major, gpu_props.minor,
+            )
 
     def train_all(
         self,
@@ -143,6 +157,11 @@ class TrainingOrchestrator:
             epochs=coarse_epochs,
             hidden_dim=coarse_hidden,
         )
+
+        # Free GPU memory before training the next model
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            logger.info("CUDA cache cleared before k-factor training")
 
         # Save coarse model
         coarse_path = self.save_dir / f"coarse_{system_name}.pt"
@@ -218,6 +237,11 @@ def main():
         "--n-trajectories", type=int, default=200,
         help="Number of diverse trajectories for data generation.",
     )
+    parser.add_argument(
+        "--device", type=str, default=None,
+        choices=["cpu", "cuda"],
+        help="Force training device. Defaults to CUDA if available.",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -227,7 +251,8 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    orch = TrainingOrchestrator(args.system)
+    device = torch.device(args.device) if args.device else None
+    orch = TrainingOrchestrator(args.system, device=device)
     orch.train_all(
         n_trajectories=args.n_trajectories,
         coarse_epochs=args.coarse_epochs,

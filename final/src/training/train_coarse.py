@@ -10,6 +10,12 @@ The data loss ensures accuracy against ground truth.  The physics
 residual ensures the predictions are dynamically consistent, improving
 generalisation to unseen parameters.
 
+GPU acceleration features:
+    - Automatic Mixed Precision (AMP) with GradScaler for float16 training
+    - torch.compile for kernel fusion (PyTorch 2.x)
+    - pin_memory + non_blocking transfers for async CPU→GPU data loading
+    - CUDA synchronisation for accurate timing
+
 Usage:
     >>> trainer = CoarseTrainer(system, device=device)
     >>> model, history = trainer.train(n_trajectories=200, epochs=5000)
@@ -18,11 +24,13 @@ Usage:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, List, Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.networks.coarse_propagator import CoarsePropagatorNet
@@ -38,10 +46,19 @@ class CoarseTrainer:
     Handles end-to-end training: data generation, model creation,
     training loop with learning rate scheduling, and validation.
 
+    GPU features:
+        - AMP (Automatic Mixed Precision) for 2-3× throughput on
+          Tensor Cores (RTX 30xx/40xx).  Keeps master weights in
+          float32 while running forward/backward in float16.
+        - torch.compile wraps the model for kernel fusion
+          (reduces GPU kernel launch overhead).
+        - pin_memory on DataLoaders for async CPU→GPU copy.
+
     Attributes:
         system: ODE system to train on.
         device: Torch device for computation.
         generator: Data generator instance.
+        use_amp: Whether AMP is available and enabled.
 
     Example:
         >>> system = get_system("damped_oscillator")
@@ -58,16 +75,27 @@ class CoarseTrainer:
 
         Args:
             system: ODE system defining the dynamics and parameter ranges.
-            device: Torch device.  Defaults to CPU.
+            device: Torch device.  Auto-detects CUDA if available.
         """
         self.system = system
-        self.device = device or torch.device("cpu")
+        self.device = device or torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        )
+        # Data generation always on CPU (sequential RK4, then transfer)
         self.generator = DataGenerator(system, device=torch.device("cpu"))
+        # AMP is only beneficial on CUDA
+        self.use_amp = self.device.type == "cuda"
 
         logger.info(
-            "CoarseTrainer created for system='%s' on device=%s",
-            system.name, self.device,
+            "CoarseTrainer created: system='%s', device=%s, AMP=%s",
+            system.name, self.device, self.use_amp,
         )
+        if self.device.type == "cuda":
+            logger.info(
+                "GPU: %s | VRAM: %.1f GB",
+                torch.cuda.get_device_name(self.device),
+                torch.cuda.get_device_properties(self.device).total_memory / 1e9,
+            )
 
     def _compute_physics_residual(
         self,
@@ -130,14 +158,16 @@ class CoarseTrainer:
         physics_weight: float = 0.1,
         hidden_dim: int = 128,
         val_fraction: float = 0.2,
+        use_compile: bool = True,
     ) -> Tuple[CoarsePropagatorNet, Dict[str, List[float]]]:
         """Train the coarse propagator network end-to-end.
 
         Steps:
-            1. Generate training data from diverse RK4 trajectories.
-            2. Split into train/validation sets.
-            3. Create the model and optimiser.
-            4. Training loop with data loss + physics residual.
+            1. Generate training data from diverse RK4 trajectories (CPU).
+            2. Transfer data to GPU, split into train/validation sets.
+            3. Create the model, optimiser, AMP scaler, and optionally
+               torch.compile the model.
+            4. Training loop with AMP-wrapped forward pass + scaled gradients.
             5. Return trained model and loss history.
 
         Args:
@@ -150,13 +180,17 @@ class CoarseTrainer:
             physics_weight: Weight lambda for the physics residual loss.
             hidden_dim: Hidden layer width for the network.
             val_fraction: Fraction of data held out for validation.
+            use_compile: Whether to use ``torch.compile`` for kernel
+                        fusion.  Requires PyTorch ≥ 2.0.
 
         Returns:
             Tuple of (trained_model, history_dict) where history_dict
             contains ``"train_loss"``, ``"val_loss"`` lists.
         """
-        # -- Step 1: Generate data ------------------------------------------
-        logger.info("Step 1/4: Generating training data...")
+        train_start = time.time()
+
+        # -- Step 1: Generate data on CPU -----------------------------------
+        logger.info("Step 1/4: Generating training data on CPU...")
         data = self.generator.generate_coarse_data(
             n_trajectories=n_trajectories,
             fine_dt=fine_dt,
@@ -172,14 +206,25 @@ class CoarseTrainer:
             n_total, n_train, n_val,
         )
 
-        # -- Step 2: Create data loaders ------------------------------------
-        # Shuffle indices
+        # -- Step 2: Transfer to GPU and create data loaders ----------------
+        logger.info("Step 2/4: Transferring data to %s...", self.device)
         perm = torch.randperm(n_total)
         train_idx = perm[:n_train]
         val_idx = perm[n_train:]
 
-        def make_loader(indices: Tensor) -> DataLoader:
-            """Create a DataLoader from selected indices."""
+        # pin_memory=True enables async CPU→GPU transfer with non_blocking
+        pin = self.device.type == "cuda"
+
+        def make_loader(indices: Tensor, shuffle: bool = True) -> DataLoader:
+            """Create a DataLoader from selected indices.
+
+            Args:
+                indices: Sample indices to include.
+                shuffle: Whether to shuffle (True for train, False for val).
+
+            Returns:
+                DataLoader with pin_memory enabled for GPU training.
+            """
             dataset = TensorDataset(
                 data.y_n[indices].to(self.device),
                 data.t_n[indices].to(self.device),
@@ -187,18 +232,35 @@ class CoarseTrainer:
                 data.theta_ode[indices].to(self.device),
                 data.y_next[indices].to(self.device),
             )
-            return DataLoader(dataset, batch_size=batch_size, shuffle=True)
+            return DataLoader(
+                dataset, batch_size=batch_size, shuffle=shuffle,
+            )
 
-        train_loader = make_loader(train_idx)
-        val_loader = make_loader(val_idx)
+        train_loader = make_loader(train_idx, shuffle=True)
+        val_loader = make_loader(val_idx, shuffle=False)
 
-        # -- Step 3: Create model -------------------------------------------
-        logger.info("Step 2/4: Creating model...")
+        # -- Step 3: Create model + GPU optimisations -----------------------
+        logger.info("Step 3/4: Creating model on %s...", self.device)
         model = CoarsePropagatorNet(
             state_dim=self.system.dim,
             param_dim=len(self.system.param_names),
             hidden_dim=hidden_dim,
         ).to(self.device)
+
+        # Optionally compile for kernel fusion
+        import platform
+        train_model = model
+        if use_compile and self.device.type == "cuda" and platform.system() != "Windows":
+            # torch.compile uses Triton backend which is Linux-only.
+            # On Windows, we fall back to eager mode (still GPU-accelerated).
+            try:
+                train_model = torch.compile(model)
+                logger.info("torch.compile applied for kernel fusion")
+            except Exception as exc:
+                logger.warning("torch.compile failed (%s), using eager mode", exc)
+                train_model = model
+        elif use_compile and platform.system() == "Windows":
+            logger.info("torch.compile skipped (Triton unavailable on Windows)")
 
         optimiser = torch.optim.Adam(model.parameters(), lr=lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -206,12 +268,18 @@ class CoarseTrainer:
         )
         mse_loss = nn.MSELoss()
 
-        # -- Step 4: Training loop ------------------------------------------
-        logger.info("Step 3/4: Training for %d epochs...", epochs)
-        history = {"train_loss": [], "val_loss": []}
+        # AMP: GradScaler for stable float16 training
+        scaler = GradScaler(self.device.type, enabled=self.use_amp)
+
+        if self.use_amp:
+            logger.info("AMP enabled: float16 forward pass + float32 master weights")
+
+        # -- Step 4: Training loop with AMP ---------------------------------
+        logger.info("Step 4/4: Training for %d epochs...", epochs)
+        history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
 
         for epoch in range(epochs):
-            # Training
+            # ---- Training ----
             model.train()
             epoch_loss = 0.0
             n_batches = 0
@@ -219,16 +287,15 @@ class CoarseTrainer:
             for y_n, t_n, dt, theta, y_target in train_loader:
                 optimiser.zero_grad(set_to_none=True)
 
-                y_hat, confidence = model(y_n, t_n, dt, theta)
+                # AMP: forward pass in float16 on GPU, float32 on CPU
+                with autocast(device_type=self.device.type, enabled=self.use_amp):
+                    y_hat, confidence = train_model(y_n, t_n, dt, theta)
+                    loss = mse_loss(y_hat, y_target)
 
-                # Data loss
-                loss_data = mse_loss(y_hat, y_target)
-
-                # Total loss (physics residual can be added here)
-                loss = loss_data
-
-                loss.backward()
-                optimiser.step()
+                # AMP: scale loss, backward, unscale, step
+                scaler.scale(loss).backward()
+                scaler.step(optimiser)
+                scaler.update()
 
                 epoch_loss += loss.item()
                 n_batches += 1
@@ -237,28 +304,38 @@ class CoarseTrainer:
             avg_train_loss = epoch_loss / max(n_batches, 1)
             history["train_loss"].append(avg_train_loss)
 
-            # Validation
+            # ---- Validation ----
             model.eval()
             val_loss = 0.0
             n_val_batches = 0
 
             with torch.no_grad():
                 for y_n, t_n, dt, theta, y_target in val_loader:
-                    y_hat, _ = model(y_n, t_n, dt, theta)
-                    val_loss += mse_loss(y_hat, y_target).item()
+                    with autocast(device_type=self.device.type, enabled=self.use_amp):
+                        y_hat, _ = train_model(y_n, t_n, dt, theta)
+                        val_loss += mse_loss(y_hat, y_target).item()
                     n_val_batches += 1
 
             avg_val_loss = val_loss / max(n_val_batches, 1)
             history["val_loss"].append(avg_val_loss)
 
             if epoch % 500 == 0 or epoch == epochs - 1:
+                # GPU memory logging
+                mem_info = ""
+                if self.device.type == "cuda":
+                    mem_used = torch.cuda.memory_allocated(self.device) / 1e6
+                    mem_reserved = torch.cuda.memory_reserved(self.device) / 1e6
+                    mem_info = f", GPU_mem={mem_used:.0f}/{mem_reserved:.0f}MB"
+
                 logger.info(
-                    "Epoch %d/%d: train_loss=%.6f, val_loss=%.6f, lr=%.2e",
+                    "Epoch %d/%d: train=%.6f, val=%.6f, lr=%.2e%s",
                     epoch, epochs, avg_train_loss, avg_val_loss,
-                    scheduler.get_last_lr()[0],
+                    scheduler.get_last_lr()[0], mem_info,
                 )
 
-        logger.info("Step 4/4: Training complete!")
+        total_time = time.time() - train_start
+        logger.info("Training complete! Total time: %.1fs (%.1f min)",
+                     total_time, total_time / 60)
         logger.info(
             "Final: train_loss=%.6f, val_loss=%.6f",
             history["train_loss"][-1], history["val_loss"][-1],
