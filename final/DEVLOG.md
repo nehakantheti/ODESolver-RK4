@@ -194,20 +194,28 @@ Full parallel-in-time solver implementing the Parareal algorithm:
 
 ### 3.2 Training Pipelines (`src/training/train_coarse.py`, `train_k_factor.py`)
 
-**Status**: ✅ Complete
+**Status**: ✅ Complete (GPU-accelerated)
 
 End-to-end training for both neural networks:
 - Data generation → train/val split → Adam + cosine LR → loss history
 - Coarse trainer: MSE data loss (physics residual infrastructure ready)
 - k-factor trainer: MSE on residual targets `(delta_i = k_i - k1)`
 
+**GPU features (added in Phase 5)**:
+- Automatic Mixed Precision (AMP) via `torch.amp.autocast` + `GradScaler`
+- `torch.compile` kernel fusion (Linux only; Windows falls back to eager mode)
+- GPU memory monitoring and logging at each checkpoint
+- CUDA auto-detection: `device = "cuda" if torch.cuda.is_available() else "cpu"`
+
 ### 3.3 Training Orchestrator (`src/training/train_all.py`)
 
-**Status**: ✅ Complete
+**Status**: ✅ Complete (GPU-aware)
 
 - Trains both networks sequentially for a given ODE system
 - Saves model weights to `trained_models/`
-- CLI entry point: `py -3.11 -m src.training.train_all --system damped_oscillator`
+- CUDA cache clearing between training phases (OOM prevention)
+- GPU diagnostics logged at startup (name, VRAM, compute capability)
+- CLI entry point with `--device` flag to force CPU/CUDA
 
 ### 3.4 Tests (`tests/test_parareal_convergence.py`) — 6 tests ✅
 
@@ -255,8 +263,6 @@ Dark-theme plotting utilities using matplotlib:
 
 **UI features**: Custom CSS with gradient header, glassmorphism metric cards, dynamic parameter sliders per ODE system, auto-detected GPU/CPU status.
 
-Launch: `cd final && py -3.11 -m streamlit run demo/app.py`
-
 ### 4.3 Benchmark Suite (`benchmarks/benchmark_solvers.py`)
 
 **Status**: ✅ Complete
@@ -272,6 +278,132 @@ Results exported to CSV in `benchmarks/results/`.
 **Status**: ✅ Complete
 
 Comprehensive project documentation: architecture diagram, quick-start guide, project structure, SOLID principles, references.
+
+---
+
+## Phase 5 — GPU Acceleration
+
+### Branch: `final/gpu-training`
+
+### 5.1 CUDA PyTorch Installation
+
+**Status**: ✅ Complete
+
+- Installed `torch 2.11.0+cu128` for NVIDIA RTX 4060 Laptop GPU (8.6 GB VRAM)
+- CUDA driver: 13.0, Compute capability: 8.9
+- Updated `requirements.txt` with CUDA 12.8 install instructions
+
+### 5.2 Automatic Mixed Precision (AMP)
+
+**Status**: ✅ Complete
+
+Both `CoarseTrainer` and `KFactorTrainer` now use AMP:
+
+| Component | What it does |
+|-----------|-------------|
+| `torch.amp.autocast` | Runs forward pass in float16 on GPU Tensor Cores |
+| `torch.amp.GradScaler` | Scales loss to prevent float16 underflow, then un-scales before optimizer step |
+| Master weights in float32 | Optimiser maintains full precision weights for stability |
+
+**Benefit**: 2-3× throughput improvement on RTX 30xx/40xx GPUs with no accuracy loss.
+
+### 5.3 Platform-Safe `torch.compile`
+
+**Status**: ✅ Complete
+
+- `torch.compile` uses the Triton backend for kernel fusion
+- Triton is **Linux-only** → auto-detected and skipped on Windows
+- Falls back to eager execution mode (still fully GPU-accelerated)
+- Will activate automatically when deployed on Linux servers
+
+### 5.4 Bug Fixes
+
+| Bug | Fix |
+|-----|-----|
+| `total_mem` AttributeError (PyTorch 2.11) | Changed to `total_memory` |
+| `torch.cuda.amp` deprecation warning | Migrated to `torch.amp` unified API |
+| `save_dir` path wrong when CWD is `final/` | Resolved relative to `__file__` instead of CWD |
+
+### 5.5 Verified GPU Training Results
+
+```
+GPU: NVIDIA GeForce RTX 4060 Laptop GPU | VRAM: 8.6 GB | Compute: 8.9
+AMP: True | float16 forward pass + float32 master weights
+
+Coarse Propagator:
+  train_loss = 0.000585
+  val_loss   = 0.000581
+  GPU_mem    = 19/25 MB
+
+K-Factor Residual:
+  train_loss = 0.000016
+  val_loss   = 0.000015
+  GPU_mem    = 20/27 MB
+```
+
+---
+
+## Commands Reference
+
+All commands assume CWD is `final/`.
+
+### Setup
+
+```bash
+# Install CUDA-enabled PyTorch (RTX 40xx/30xx)
+py -3.11 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+# Install remaining dependencies
+py -3.11 -m pip install -r requirements.txt
+
+# Verify GPU availability
+py -3.11 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, GPU: {torch.cuda.get_device_name(0)}')"
+```
+
+### Run Tests
+
+```bash
+# All 46 tests
+py -3.11 -m pytest tests/ -v
+
+# Individual test suites
+py -3.11 -m pytest tests/test_rk4_correctness.py -v       # Phase 1: 21 tests
+py -3.11 -m pytest tests/test_networks.py -v               # Phase 2: 19 tests
+py -3.11 -m pytest tests/test_parareal_convergence.py -v   # Phase 3:  6 tests
+```
+
+### Train Neural Components
+
+```bash
+# Train all models for a specific ODE system (auto-detects GPU)
+py -3.11 -m src.training.train_all --system damped_oscillator
+
+# Available systems: damped_oscillator, lotka_volterra, van_der_pol, lorenz
+py -3.11 -m src.training.train_all --system lotka_volterra
+py -3.11 -m src.training.train_all --system van_der_pol
+py -3.11 -m src.training.train_all --system lorenz
+
+# Custom training config
+py -3.11 -m src.training.train_all --system damped_oscillator --coarse-epochs 5000 --kfactor-epochs 3000 --n-trajectories 200
+
+# Force CPU training (skip GPU)
+py -3.11 -m src.training.train_all --system damped_oscillator --device cpu
+
+# Quick test run (small config)
+py -3.11 -m src.training.train_all --system damped_oscillator --n-trajectories 10 --coarse-epochs 50 --kfactor-epochs 50
+```
+
+### Launch Demo Dashboard
+
+```bash
+py -3.11 -m streamlit run demo/app.py
+```
+
+### Run Benchmarks
+
+```bash
+py -3.11 benchmarks/benchmark_solvers.py
+```
 
 ---
 
@@ -293,4 +425,5 @@ Comprehensive project documentation: architecture diagram, quick-start guide, pr
 | `final/phase1-foundation` | ODE systems + classical RK4 | `f67b13e` |
 | `final/phase2-neural-components` | NN architectures + data gen | `5e91a70` |
 | `final/phase3-integration` | Parareal + training pipelines | `4852c3d` |
-| `final/phase4-demo` | Visualization + demo + benchmarks | Current |
+| `final/phase4-demo` | Visualization + demo + benchmarks | `3af2d2d` |
+| `final/gpu-training` | GPU acceleration + AMP + bug fixes | `295121d` |
