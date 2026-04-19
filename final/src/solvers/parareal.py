@@ -107,6 +107,7 @@ class PararealSolver:
         device: torch.device | None = None,
         trust_gate: TrustGate | None = None,
         max_iterations: int = 50,
+        coarse_dt: float = 0.1,
     ):
         """Initialise the Parareal solver.
 
@@ -117,16 +118,22 @@ class PararealSolver:
                        default gate is created.
             max_iterations: Maximum number of Parareal iterations before
                            giving up (prevents infinite loops).
+            coarse_dt: Step size the coarse NN was trained on.  Must match
+                      the ``coarse_dt`` used during data generation
+                      (default 0.1).  The coarse propagator walks through
+                      each slab in increments of this size, calling the NN
+                      once per step.
         """
         self.coarse_net = coarse_net
         self.device = device or torch.device("cpu")
         self.fine_solver = ClassicalRK4Solver(device=self.device)
         self.trust_gate = trust_gate or TrustGate()
         self.max_iterations = max_iterations
+        self.coarse_dt = coarse_dt
 
         logger.info(
-            "PararealSolver initialised: device=%s, max_iter=%d",
-            self.device, max_iterations,
+            "PararealSolver initialised: device=%s, max_iter=%d, coarse_dt=%.3f",
+            self.device, max_iterations, coarse_dt,
         )
 
     def _coarse_propagate(
@@ -136,23 +143,42 @@ class PararealSolver:
         delta_t: float,
         theta_ode: Tensor,
     ) -> Tuple[Tensor, Tensor]:
-        """Run the neural coarse propagator for one slab.
+        """Run the neural coarse propagator across one slab via multi-step.
 
-        Wraps ``coarse_net.predict()`` with logging.
+        Instead of calling the NN once with the full slab width ``delta_t``
+        (which would extrapolate far beyond the training distribution),
+        we walk through the slab in increments of ``self.coarse_dt``
+        (matching the step size the NN was trained on).
+
+        Example:
+            If delta_t=2.5 and coarse_dt=0.1, the NN is called 25 times,
+            each predicting 0.1s ahead — exactly what it was trained to do.
 
         Args:
             y_n: Current state, shape ``(dim,)``.
             t_n: Current time.
-            delta_t: Coarse time step.
+            delta_t: Total time interval to propagate across.
             theta_ode: ODE parameter vector.
 
         Returns:
-            Tuple of (predicted_state, confidence).
+            Tuple of (predicted_state, average_confidence).
         """
-        y_hat, confidence = self.coarse_net.predict(
-            y_n, t_n, delta_t, theta_ode
+        n_coarse_steps = max(1, round(delta_t / self.coarse_dt))
+        step_dt = delta_t / n_coarse_steps  # Exactly covers delta_t
+
+        y = y_n
+        total_confidence = 0.0
+
+        for i in range(n_coarse_steps):
+            t_curr = t_n + i * step_dt
+            y, conf = self.coarse_net.predict(y, t_curr, step_dt, theta_ode)
+            total_confidence += conf.squeeze().item()
+
+        avg_confidence = torch.tensor(
+            [total_confidence / n_coarse_steps],
+            device=self.device,
         )
-        return y_hat, confidence
+        return y, avg_confidence
 
     def _fine_solve_slab(
         self,
