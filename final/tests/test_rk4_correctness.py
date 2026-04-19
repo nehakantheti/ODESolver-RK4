@@ -383,3 +383,116 @@ class TestSolveInterval:
         assert torch.allclose(y_end_full, y_end_interval, atol=1e-7), (
             f"Endpoints differ: full={y_end_full}, interval={y_end_interval}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test: solve_batched_endpoints (Parareal GPU fine pass)
+# ---------------------------------------------------------------------------
+
+class TestBatchedEndpoints:
+    """Test solve_batched_endpoints matches individual solve_interval results.
+
+    This validates the core GPU parallelism primitive used by the
+    Parareal fine pass: running P endpoint-only RK4 solves in one
+    batched call via torch.vmap.
+    """
+
+    def test_batched_matches_individual(self, solver, damped_system):
+        """Each batched endpoint should match the corresponding solve_interval."""
+        params = damped_system.default_params()
+        t_span = (0.0, 5.0)
+        dt = 0.01
+
+        # 4 different initial conditions
+        y0_list = [
+            torch.tensor([1.0, 0.0]),
+            torch.tensor([0.0, 1.0]),
+            torch.tensor([2.0, -1.0]),
+            torch.tensor([0.5, 0.5]),
+        ]
+        y0_batch = torch.stack(y0_list)
+
+        # Batched solve
+        endpoints = solver.solve_batched_endpoints(
+            f=damped_system.f, y0_batch=y0_batch,
+            t_span=t_span, dt=dt, params=params,
+        )
+
+        assert endpoints.shape == (4, 2), f"Expected (4, 2), got {endpoints.shape}"
+
+        # Compare with individual solve_interval results
+        for i, y0 in enumerate(y0_list):
+            individual = solver.solve_interval(
+                f=damped_system.f, y0=y0,
+                t_start=t_span[0], t_end=t_span[1],
+                dt=dt, params=params,
+            )
+            assert torch.allclose(endpoints[i], individual, atol=1e-6), (
+                f"IC {i}: batched={endpoints[i]}, individual={individual}"
+            )
+
+    def test_different_ics_produce_different_endpoints(self, solver, damped_system):
+        """Different initial conditions should produce different endpoints."""
+        params = damped_system.default_params()
+        y0_batch = torch.tensor([[1.0, 0.0], [5.0, 0.0]])
+
+        endpoints = solver.solve_batched_endpoints(
+            f=damped_system.f, y0_batch=y0_batch,
+            t_span=(0.0, 2.0), dt=0.01, params=params,
+        )
+
+        assert not torch.allclose(endpoints[0], endpoints[1], atol=1e-3), (
+            "Different ICs should produce different endpoints"
+        )
+
+    def test_single_ic_batch(self, solver, damped_system):
+        """Batch of size 1 should still work."""
+        params = damped_system.default_params()
+        y0_batch = torch.tensor([[1.0, 0.0]])
+
+        endpoints = solver.solve_batched_endpoints(
+            f=damped_system.f, y0_batch=y0_batch,
+            t_span=(0.0, 2.0), dt=0.01, params=params,
+        )
+
+        assert endpoints.shape == (1, 2)
+
+    @pytest.mark.parametrize("system_name", [
+        "damped_oscillator", "lotka_volterra", "van_der_pol", "lorenz",
+    ])
+    def test_all_systems(self, solver, system_name):
+        """Batched endpoints should match individual for all ODE systems."""
+        system = get_system(system_name)
+        params = system.default_params()
+        y0 = system.default_initial_condition()
+        dim = y0.shape[-1]
+
+        # Create 3 ICs around the default
+        y0_batch = torch.stack([
+            y0,
+            y0 * 1.1,
+            y0 * 0.9,
+        ])
+
+        t_span = (0.0, 2.0)
+        dt = 0.01
+
+        endpoints = solver.solve_batched_endpoints(
+            f=system.f, y0_batch=y0_batch,
+            t_span=t_span, dt=dt, params=params,
+        )
+
+        assert endpoints.shape == (3, dim)
+
+        # Verify against individual solves
+        for i in range(3):
+            individual = solver.solve_interval(
+                f=system.f, y0=y0_batch[i],
+                t_start=t_span[0], t_end=t_span[1],
+                dt=dt, params=params,
+            )
+            assert torch.allclose(endpoints[i], individual, atol=1e-5), (
+                f"{system_name} IC {i}: "
+                f"batched={endpoints[i]}, individual={individual}"
+            )
+

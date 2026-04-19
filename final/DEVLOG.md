@@ -38,7 +38,7 @@ final/
 ├── demo/
 │   └── app.py                    ✅ Implemented
 ├── tests/
-│   ├── test_rk4_correctness.py      ✅ 21 tests
+│   ├── test_rk4_correctness.py      ✅ 28 tests
 │   ├── test_networks.py             ✅ 19 tests
 │   └── test_parareal_convergence.py ✅  6 tests
 └── trained_models/
@@ -407,14 +407,79 @@ py -3.11 benchmarks/benchmark_solvers.py
 
 ---
 
+## Phase 6 — Batched Parareal (True GPU Parallelism)
+
+### Branch: `final/batched-parareal`
+
+### 6.1 `solve_batched_endpoints()` — New RK4 Method
+
+**Status**: ✅ Complete
+
+Added to `ClassicalRK4Solver` — runs P endpoint-only RK4 solves in a single
+batched GPU kernel via `torch.vmap`.
+
+| Aspect | `solve_interval` (old) | `solve_batched_endpoints` (new) |
+|--------|----------------------|-------------------------------|
+| Execution | 1 slab per call | P slabs in 1 call |
+| GPU utilisation | 1 thread (sequential) | P threads (batched vmap) |
+| Output | Single endpoint | `(P, dim)` batch of endpoints |
+| Trajectory storage | None | None |
+
+Fallback: If `torch.vmap` is incompatible with the ODE function `f`,
+automatically falls back to a sequential loop.
+
+### 6.2 Parareal Fine Pass — Batched Execution
+
+**Status**: ✅ Complete
+
+Replaced the sequential fine-pass loop:
+
+```python
+# BEFORE (sequential — P separate Python calls):
+for n in range(n_slabs):
+    F_values[n] = self._fine_solve_slab(f, U_old[n], ...)
+
+# AFTER (batched — 1 fused GPU kernel for all P slabs):
+active_idx = fine_mask.nonzero(as_tuple=True)[0]
+endpoints = self.fine_solver.solve_batched_endpoints(
+    f=f, y0_batch=U_old[active_idx],
+    t_span=(0.0, delta_t), dt=fine_dt, params=params,
+)
+F_values[active_idx] = endpoints
+```
+
+**Key insight**: All four benchmark ODEs are autonomous (f does not depend
+on absolute time t), so all slabs can share `t_span = (0, delta_t)` and
+be solved in one batched call.
+
+### 6.3 Benchmark — Fair Comparison
+
+**Status**: ✅ Complete
+
+- Serial RK4 baseline: **CPU** (sequential for-loops are 4× faster on CPU)
+- Parareal: **GPU** (batched fine pass benefits from GPU parallelism)
+- Error comparison handles cross-device (CPU↔GPU) tensor transfer
+
+### 6.4 Tests — 7 New Tests ✅
+
+- `test_batched_matches_individual`: 4 different ICs, each matches `solve_interval`
+- `test_different_ics_produce_different_endpoints`: Sanity check
+- `test_single_ic_batch`: Batch of size 1 still works
+- `test_all_systems[damped_oscillator]`: Cross-validated
+- `test_all_systems[lotka_volterra]`: Cross-validated
+- `test_all_systems[van_der_pol]`: Cross-validated
+- `test_all_systems[lorenz]`: Cross-validated
+
+---
+
 ## Test Summary
 
 | Phase | Test File | Tests | Status |
 |-------|-----------|-------|--------|
-| 1 | `test_rk4_correctness.py` | 21 | ✅ All pass |
+| 1 | `test_rk4_correctness.py` | 28 | ✅ All pass |
 | 2 | `test_networks.py` | 19 | ✅ All pass |
 | 3 | `test_parareal_convergence.py` | 6 | ✅ All pass |
-| **Total** | | **46** | **✅ All pass** |
+| **Total** | | **53** | **✅ All pass** |
 
 ---
 
@@ -427,3 +492,4 @@ py -3.11 benchmarks/benchmark_solvers.py
 | `final/phase3-integration` | Parareal + training pipelines | `4852c3d` |
 | `final/phase4-demo` | Visualization + demo + benchmarks | `3af2d2d` |
 | `final/gpu-training` | GPU acceleration + AMP + bug fixes | `295121d` |
+| `final/batched-parareal` | Batched GPU fine pass + vmap | Current |

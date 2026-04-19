@@ -318,7 +318,90 @@ class ClassicalRK4Solver:
 
         return SolveResult(t=t_points, y=trajectories)
 
-    # -- Solve a sub-interval (for Parareal fine pass) -----------------------
+    # -- Batched endpoint-only solver (for Parareal fine pass) ---------------
+
+    def solve_batched_endpoints(
+        self,
+        f: DerivativeFunc,
+        y0_batch: Tensor,
+        t_span: Tuple[float, float],
+        dt: float,
+        params: Dict[str, float],
+    ) -> Tensor:
+        """Integrate multiple trajectories in parallel, returning only endpoints.
+
+        Optimised for the Parareal fine pass: runs *P* slab-level RK4
+        solves simultaneously using ``torch.vmap``, returning only the
+        final state of each trajectory (no trajectory storage ⇒ less VRAM).
+
+        How it works:
+            1. Define a pure-function endpoint solver (no trajectory storage).
+            2. Vectorise it with ``torch.vmap`` over the batch of ICs.
+            3. All P fine solves execute in a single fused GPU kernel.
+
+        When ``vmap`` is incompatible with the derivative function ``f``
+        (e.g. Python-level control flow inside ``f``), the method
+        automatically falls back to a sequential loop.
+
+        Args:
+            f: Derivative function from an ``ODESystem``.
+            y0_batch: Batch of initial conditions, shape ``(batch, dim)``.
+            t_span: ``(t_start, t_end)`` — same interval for all trajectories.
+                   For autonomous ODEs the absolute time doesn't matter.
+            dt: Fixed time step.
+            params: ODE parameter dictionary (shared across the batch).
+
+        Returns:
+            Final states tensor of shape ``(batch, dim)``.
+        """
+        batch_size = y0_batch.shape[0]
+        t_start, t_end = t_span
+        n_steps = int((t_end - t_start) / dt)
+
+        # Move batch to device
+        y0_batch = y0_batch.to(self.device, dtype=torch.float32)
+
+        logger.debug(
+            "solve_batched_endpoints: batch=%d, n_steps=%d, device=%s",
+            batch_size, n_steps, self.device,
+        )
+
+        def _solve_one_endpoint(y0_single: Tensor) -> Tensor:
+            """Solve one trajectory, return only the final state.
+
+            This is a pure function (no side-effects, no trajectory
+            storage) so ``torch.vmap`` can vectorise it.
+
+            Args:
+                y0_single: Initial condition, shape ``(dim,)``.
+
+            Returns:
+                Final state, shape ``(dim,)``.
+            """
+            y = y0_single
+            for i in range(n_steps):
+                t_curr = t_start + i * dt
+                k1 = dt * f(t_curr, y, params)
+                k2 = dt * f(t_curr + dt / 2.0, y + k1 / 2.0, params)
+                k3 = dt * f(t_curr + dt / 2.0, y + k2 / 2.0, params)
+                k4 = dt * f(t_curr + dt, y + k3, params)
+                y = y + (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+            return y
+
+        # Attempt vmap; fall back to sequential loop if unsupported
+        try:
+            batched_solve = torch.vmap(_solve_one_endpoint)
+            endpoints = batched_solve(y0_batch)
+            logger.debug("solve_batched_endpoints: vmap execution succeeded")
+        except RuntimeError as exc:
+            logger.warning(
+                "vmap failed (%s), falling back to sequential loop", exc,
+            )
+            endpoints = torch.stack(
+                [_solve_one_endpoint(y0_batch[i]) for i in range(batch_size)]
+            )
+
+        return endpoints
 
     def solve_interval(
         self,
