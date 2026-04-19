@@ -1,11 +1,16 @@
 """Benchmark suite for comparing solver performance.
 
 Runs systematic benchmarks comparing:
-    1. Classical RK4 at various step sizes
+    1. Classical RK4 at various step sizes (GPU-accelerated)
     2. Parareal with neural coarse propagator
-    3. Serial vs batched execution modes
+    3. Serial vs parallel execution modes
 
-Results are printed to console and saved to a CSV file.
+GPU usage:
+    - All solvers run on CUDA if available
+    - CUDA events used for accurate GPU timing
+    - torch.cuda.synchronize() ensures timing accuracy
+
+Results are printed to console and saved to CSV files.
 
 Usage:
     cd final
@@ -40,10 +45,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Auto-detect device
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _timed_call(fn, device, n_runs=3):
+    """Time a callable accurately on both CPU and GPU.
+
+    On CUDA: uses torch.cuda.Event for precise GPU timing.
+    On CPU: uses time.perf_counter.
+
+    Args:
+        fn: Callable to time (no arguments).
+        device: Torch device being used.
+        n_runs: Number of repetitions to average.
+
+    Returns:
+        Tuple of (result_from_last_call, avg_time_ms).
+    """
+    if device.type == "cuda":
+        # Warmup
+        result = fn()
+        torch.cuda.synchronize()
+
+        times = []
+        for _ in range(n_runs):
+            start_event = torch.cuda.Event(enable_timing=True)
+            end_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
+            result = fn()
+            end_event.record()
+            torch.cuda.synchronize()
+            times.append(start_event.elapsed_time(end_event))
+    else:
+        # Warmup
+        result = fn()
+
+        times = []
+        for _ in range(n_runs):
+            start = time.perf_counter()
+            result = fn()
+            times.append((time.perf_counter() - start) * 1000)
+
+    return result, sum(times) / len(times)
+
 
 def benchmark_step_sizes():
     """Benchmark classical RK4 across step sizes for all ODE systems.
 
+    All solves run on the auto-detected device (GPU if available).
     Measures wall-clock time and accuracy (vs fine reference solution)
     for step sizes from 0.05 down to 0.0001.
 
@@ -51,16 +101,16 @@ def benchmark_step_sizes():
         DataFrame with columns: System, dt, steps, time_ms, error.
     """
     logger.info("=" * 60)
-    logger.info("BENCHMARK: Step Size Sweep")
+    logger.info("BENCHMARK: Step Size Sweep (device=%s)", DEVICE)
     logger.info("=" * 60)
 
-    solver = ClassicalRK4Solver(device=torch.device("cpu"))
+    solver = ClassicalRK4Solver(device=DEVICE)
     dt_values = [0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001]
     results = []
 
     for system_name in SYSTEM_REGISTRY:
         system = get_system(system_name)
-        y0 = system.default_initial_condition()
+        y0 = system.default_initial_condition().to(DEVICE)
         t_span = system.default_time_span()
         params = system.default_params()
 
@@ -71,23 +121,15 @@ def benchmark_step_sizes():
         )
 
         for dt_val in dt_values:
-            # Warm up
-            solver.solve_single(f=system.f, y0=y0, t_span=t_span,
-                                dt=dt_val, params=params)
-
-            # Timed run (average of 3)
-            times = []
-            for _ in range(3):
-                start = time.perf_counter()
-                result = solver.solve_single(
+            def _run():
+                return solver.solve_single(
                     f=system.f, y0=y0, t_span=t_span,
                     dt=dt_val, params=params,
                 )
-                times.append(time.perf_counter() - start)
 
-            avg_time = sum(times) / len(times) * 1000  # ms
+            result, avg_time = _timed_call(_run, DEVICE)
 
-            # Error at final point
+            # Error at final point (both on same device)
             err = torch.max(torch.abs(result.y[-1] - ref.y[-1])).item()
 
             results.append({
@@ -109,6 +151,7 @@ def benchmark_step_sizes():
 def benchmark_parareal_slabs():
     """Benchmark Parareal solver with varying slab counts.
 
+    Everything runs on the auto-detected device.
     Trains a coarse propagator (lightweight) and measures wall time
     for different numbers of slabs on the damped oscillator.
 
@@ -116,55 +159,57 @@ def benchmark_parareal_slabs():
         DataFrame with columns: n_slabs, iterations, time_ms, error.
     """
     logger.info("=" * 60)
-    logger.info("BENCHMARK: Parareal Slab Count")
+    logger.info("BENCHMARK: Parareal Slab Count (device=%s)", DEVICE)
     logger.info("=" * 60)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     system = get_system("damped_oscillator")
 
-    # Quick-train a coarse propagator
+    # Quick-train a coarse propagator on GPU
     logger.info("Training coarse propagator for benchmark...")
-    trainer = CoarseTrainer(system, device=device)
+    trainer = CoarseTrainer(system, device=DEVICE)
     model, _ = trainer.train(
         n_trajectories=50, epochs=500, hidden_dim=32,
     )
 
-    y0 = system.default_initial_condition().to(device)
+    y0 = system.default_initial_condition().to(DEVICE)
     params = system.default_params()
-    theta = system.param_vector(params, device=device)
+    theta = system.param_vector(params, device=DEVICE)
 
     slab_counts = [2, 4, 8, 12, 16]
     results = []
 
-    # Serial reference time
-    solver = ClassicalRK4Solver(device=device)
-    start = time.perf_counter()
-    serial_result = solver.solve_single(
-        f=system.f, y0=y0.cpu(), t_span=system.default_time_span(),
-        dt=0.01, params=params,
-    )
-    serial_time = (time.perf_counter() - start) * 1000
-    logger.info("Serial RK4 time: %.2fms", serial_time)
+    # Serial reference: run classical RK4 on same device
+    solver = ClassicalRK4Solver(device=DEVICE)
+
+    def _serial_run():
+        return solver.solve_single(
+            f=system.f, y0=y0, t_span=system.default_time_span(),
+            dt=0.01, params=params,
+        )
+
+    serial_result, serial_time = _timed_call(_serial_run, DEVICE)
+    logger.info("Serial RK4 time: %.2fms (device=%s)", serial_time, DEVICE)
 
     for n_slabs in slab_counts:
         parareal = PararealSolver(
-            coarse_net=model, device=device,
+            coarse_net=model, device=DEVICE,
             trust_gate=TrustGate(initial_threshold=0.1),
             max_iterations=30,
         )
 
-        start = time.perf_counter()
-        result = parareal.solve(
-            f=system.f, y0=y0, t_span=system.default_time_span(),
-            n_slabs=n_slabs, fine_dt=0.01,
-            params=params, theta_ode=theta,
-            tolerance=1e-5, use_trust_gate=True,
-        )
-        elapsed = (time.perf_counter() - start) * 1000
+        def _parareal_run():
+            return parareal.solve(
+                f=system.f, y0=y0, t_span=system.default_time_span(),
+                n_slabs=n_slabs, fine_dt=0.01,
+                params=params, theta_ode=theta,
+                tolerance=1e-5, use_trust_gate=True,
+            )
 
-        # Error vs serial at matched endpoints
+        result, elapsed = _timed_call(_parareal_run, DEVICE, n_runs=1)
+
+        # Error vs serial: both on same device, no transfer needed
         endpoint_err = torch.max(
-            torch.abs(result.y[-1].cpu() - serial_result.y[-1])
+            torch.abs(result.y[-1] - serial_result.y[-1])
         ).item()
 
         results.append({
@@ -188,7 +233,9 @@ def benchmark_parareal_slabs():
 def main():
     """Run all benchmarks and save results."""
     logger.info("Starting benchmark suite...")
-    logger.info("Device: %s", "CUDA" if torch.cuda.is_available() else "CPU")
+    logger.info("Device: %s", DEVICE)
+    if DEVICE.type == "cuda":
+        logger.info("GPU: %s", torch.cuda.get_device_name(DEVICE))
     logger.info("PyTorch: %s", torch.__version__)
 
     output_dir = Path("benchmarks/results")
