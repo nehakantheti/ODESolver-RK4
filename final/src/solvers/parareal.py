@@ -294,17 +294,27 @@ class PararealSolver:
                 k, n_fine_this_iter, n_slabs,
             )
 
-            # Run fine solver on active slabs
-            for n in range(n_slabs):
-                if fine_mask[n]:
-                    F_values[n] = self._fine_solve_slab(
-                        f, U_old[n],
-                        slab_times[n].item(), slab_times[n + 1].item(),
-                        fine_dt, params,
-                    )
-                else:
-                    # Reuse coarse prediction for skipped slabs
-                    F_values[n] = G_old[n]
+            # Run fine solver on active slabs (batched GPU execution).
+            # All slab intervals have equal width delta_t.  For autonomous
+            # ODEs (f does not depend on t), we can batch all ICs with a
+            # shared t_span = (0, delta_t) and solve in one GPU kernel.
+            active_idx = fine_mask.nonzero(as_tuple=True)[0]
+
+            if len(active_idx) > 0:
+                active_y0 = U_old[active_idx]
+                endpoints = self.fine_solver.solve_batched_endpoints(
+                    f=f,
+                    y0_batch=active_y0,
+                    t_span=(0.0, delta_t),
+                    dt=fine_dt,
+                    params=params,
+                )
+                F_values[active_idx] = endpoints
+
+            # Fill skipped slabs with cached coarse predictions
+            skipped_idx = (~fine_mask).nonzero(as_tuple=True)[0]
+            if len(skipped_idx) > 0:
+                F_values[skipped_idx] = G_old[skipped_idx]
 
             # Parareal correction (sequential due to dependency chain)
             for n in range(n_slabs):

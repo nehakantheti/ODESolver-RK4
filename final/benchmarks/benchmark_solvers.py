@@ -171,24 +171,25 @@ def benchmark_parareal_slabs():
         n_trajectories=50, epochs=500, hidden_dim=32,
     )
 
-    y0 = system.default_initial_condition().to(DEVICE)
+    y0_cpu = system.default_initial_condition()
+    y0_gpu = y0_cpu.to(DEVICE)
     params = system.default_params()
     theta = system.param_vector(params, device=DEVICE)
 
     slab_counts = [2, 4, 8, 12, 16]
     results = []
 
-    # Serial reference: run classical RK4 on same device
-    solver = ClassicalRK4Solver(device=DEVICE)
+    # Serial reference: CPU is faster for sequential RK4 (no kernel overhead)
+    cpu_solver = ClassicalRK4Solver(device=torch.device("cpu"))
 
     def _serial_run():
-        return solver.solve_single(
-            f=system.f, y0=y0, t_span=system.default_time_span(),
+        return cpu_solver.solve_single(
+            f=system.f, y0=y0_cpu, t_span=system.default_time_span(),
             dt=0.01, params=params,
         )
 
-    serial_result, serial_time = _timed_call(_serial_run, DEVICE)
-    logger.info("Serial RK4 time: %.2fms (device=%s)", serial_time, DEVICE)
+    serial_result, serial_time = _timed_call(_serial_run, torch.device("cpu"))
+    logger.info("Serial RK4 baseline: %.2fms (CPU)", serial_time)
 
     for n_slabs in slab_counts:
         parareal = PararealSolver(
@@ -199,7 +200,7 @@ def benchmark_parareal_slabs():
 
         def _parareal_run():
             return parareal.solve(
-                f=system.f, y0=y0, t_span=system.default_time_span(),
+                f=system.f, y0=y0_gpu, t_span=system.default_time_span(),
                 n_slabs=n_slabs, fine_dt=0.01,
                 params=params, theta_ode=theta,
                 tolerance=1e-5, use_trust_gate=True,
@@ -207,9 +208,9 @@ def benchmark_parareal_slabs():
 
         result, elapsed = _timed_call(_parareal_run, DEVICE, n_runs=1)
 
-        # Error vs serial: both on same device, no transfer needed
+        # Error vs serial: move GPU result to CPU for comparison
         endpoint_err = torch.max(
-            torch.abs(result.y[-1] - serial_result.y[-1])
+            torch.abs(result.y[-1].cpu() - serial_result.y[-1].cpu())
         ).item()
 
         results.append({
