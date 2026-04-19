@@ -231,6 +231,98 @@ def benchmark_parareal_slabs():
     return pd.DataFrame(results)
 
 
+def benchmark_parareal_hard():
+    """Benchmark Parareal on a HARD problem (fine dt=0.001, 20K steps).
+
+    This is the regime where Parareal is designed to shine: the serial
+    solve is expensive (20,000 steps → ~3-4 seconds on CPU), so the
+    parallel batched fine pass can amortise its overhead.
+
+    Uses a better-trained coarse propagator (more data, larger model,
+    more epochs) to reduce the iteration count K.
+
+    Returns:
+        DataFrame with columns: n_slabs, iterations, time_ms, error.
+    """
+    logger.info("=" * 60)
+    logger.info("BENCHMARK: Parareal HARD (fine_dt=0.001, device=%s)", DEVICE)
+    logger.info("=" * 60)
+
+    system = get_system("damped_oscillator")
+
+    # Better-trained coarse propagator for fewer Parareal iterations
+    logger.info("Training stronger coarse propagator (hidden=64, epochs=1000)...")
+    trainer = CoarseTrainer(system, device=DEVICE)
+    model, _ = trainer.train(
+        n_trajectories=100, epochs=1000, hidden_dim=64,
+    )
+
+    y0_cpu = system.default_initial_condition()
+    y0_gpu = y0_cpu.to(DEVICE)
+    params = system.default_params()
+    theta = system.param_vector(params, device=DEVICE)
+
+    fine_dt = 0.001  # 10× finer → 10× more serial work
+
+    slab_counts = [2, 4, 8, 16]
+    results = []
+
+    # Serial reference on CPU (sequential RK4)
+    cpu_solver = ClassicalRK4Solver(device=torch.device("cpu"))
+
+    def _serial_run():
+        return cpu_solver.solve_single(
+            f=system.f, y0=y0_cpu, t_span=system.default_time_span(),
+            dt=fine_dt, params=params,
+        )
+
+    serial_result, serial_time = _timed_call(_serial_run, torch.device("cpu"))
+    logger.info(
+        "Serial RK4 baseline: %.2fms (CPU, dt=%.4f, steps=%d)",
+        serial_time, fine_dt,
+        int((system.default_time_span()[1] - system.default_time_span()[0]) / fine_dt),
+    )
+
+    for n_slabs in slab_counts:
+        parareal = PararealSolver(
+            coarse_net=model, device=DEVICE,
+            trust_gate=TrustGate(initial_threshold=0.1),
+            max_iterations=50,
+        )
+
+        def _parareal_run():
+            return parareal.solve(
+                f=system.f, y0=y0_gpu, t_span=system.default_time_span(),
+                n_slabs=n_slabs, fine_dt=fine_dt,
+                params=params, theta_ode=theta,
+                tolerance=1e-6, use_trust_gate=True,
+            )
+
+        result, elapsed = _timed_call(_parareal_run, DEVICE, n_runs=1)
+
+        # Error vs serial: move GPU result to CPU for comparison
+        endpoint_err = torch.max(
+            torch.abs(result.y[-1].cpu() - serial_result.y[-1].cpu())
+        ).item()
+
+        results.append({
+            "n_slabs": n_slabs,
+            "iterations": result.n_iterations,
+            "time_ms": round(elapsed, 2),
+            "serial_time_ms": round(serial_time, 2),
+            "speedup": round(serial_time / elapsed, 2) if elapsed > 0 else 0,
+            "endpoint_error": endpoint_err,
+        })
+
+        logger.info(
+            "P=%d | iters=%d | time=%.2fms | speedup=%.2fx | err=%.2e",
+            n_slabs, result.n_iterations, elapsed,
+            serial_time / elapsed if elapsed > 0 else 0, endpoint_err,
+        )
+
+    return pd.DataFrame(results)
+
+
 def main():
     """Run all benchmarks and save results."""
     logger.info("Starting benchmark suite...")
@@ -249,16 +341,25 @@ def main():
                 output_dir / "step_size_benchmark.csv")
     print("\n" + df_steps.to_string(index=False))
 
-    # Benchmark 2: Parareal slabs
+    # Benchmark 2: Parareal slabs (easy — dt=0.01, 2K steps)
     print("\n")
-    df_slabs = benchmark_parareal_slabs()
-    df_slabs.to_csv(output_dir / "parareal_benchmark.csv", index=False)
-    logger.info("Parareal results saved to %s",
-                output_dir / "parareal_benchmark.csv")
-    print("\n" + df_slabs.to_string(index=False))
+    df_easy = benchmark_parareal_slabs()
+    df_easy.to_csv(output_dir / "parareal_easy_benchmark.csv", index=False)
+    logger.info("Parareal EASY results saved to %s",
+                output_dir / "parareal_easy_benchmark.csv")
+    print("\n" + df_easy.to_string(index=False))
+
+    # Benchmark 3: Parareal slabs (hard — dt=0.001, 20K steps)
+    print("\n")
+    df_hard = benchmark_parareal_hard()
+    df_hard.to_csv(output_dir / "parareal_hard_benchmark.csv", index=False)
+    logger.info("Parareal HARD results saved to %s",
+                output_dir / "parareal_hard_benchmark.csv")
+    print("\n" + df_hard.to_string(index=False))
 
     logger.info("All benchmarks complete!")
 
 
 if __name__ == "__main__":
     main()
+
