@@ -226,3 +226,5 @@ GEMINI.md
 
 # implementation_plan.md
 # RESEARCH_REFERENCES.md
+*.pt
+*.csv
