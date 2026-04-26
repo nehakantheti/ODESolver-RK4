@@ -159,6 +159,7 @@ class CoarseTrainer:
         hidden_dim: int = 128,
         val_fraction: float = 0.2,
         use_compile: bool = True,
+        lbfgs_steps: int = 50,
     ) -> Tuple[CoarsePropagatorNet, Dict[str, List[float]]]:
         """Train the coarse propagator network end-to-end.
 
@@ -182,6 +183,12 @@ class CoarseTrainer:
             val_fraction: Fraction of data held out for validation.
             use_compile: Whether to use ``torch.compile`` for kernel
                         fusion.  Requires PyTorch ≥ 2.0.
+            lbfgs_steps: Number of L-BFGS fine-tuning steps after Adam
+                        training.  Uses full-batch second-order optimisation
+                        with strong Wolfe line search for rapid convergence
+                        to a sharper minimum.  Adapted from the hybrid
+                        optimizer in ``mid/phase1/pinn_hybrid.py``.
+                        Set to 0 to use Adam only.  Default 50.
 
         Returns:
             Tuple of (trained_model, history_dict) where history_dict
@@ -332,6 +339,77 @@ class CoarseTrainer:
                     epoch, epochs, avg_train_loss, avg_val_loss,
                     scheduler.get_last_lr()[0], mem_info,
                 )
+
+        # -- Stage 2: L-BFGS fine-tuning (hybrid optimizer) ------------------
+        if lbfgs_steps > 0:
+            logger.info(
+                "L-BFGS fine-tuning: %d steps (lr=1.0, history=10, "
+                "strong_wolfe)...",
+                lbfgs_steps,
+            )
+
+            # L-BFGS requires full-batch data (not mini-batches)
+            full_y_n = data.y_n[train_idx].to(self.device)
+            full_t_n = data.t_n[train_idx].to(self.device)
+            full_dt = data.delta_t[train_idx].to(self.device)
+            full_theta = data.theta_ode[train_idx].to(self.device)
+            full_y_target = data.y_next[train_idx].to(self.device)
+
+            # Validation tensors for L-BFGS logging
+            val_y_n = data.y_n[val_idx].to(self.device)
+            val_t_n = data.t_n[val_idx].to(self.device)
+            val_dt_t = data.delta_t[val_idx].to(self.device)
+            val_theta = data.theta_ode[val_idx].to(self.device)
+            val_y_target = data.y_next[val_idx].to(self.device)
+
+            lbfgs = torch.optim.LBFGS(
+                model.parameters(),
+                lr=1.0,
+                history_size=10,
+                max_iter=20,
+                line_search_fn="strong_wolfe",
+            )
+
+            model.train()
+            for step in range(lbfgs_steps):
+                def closure():
+                    lbfgs.zero_grad()
+                    # No AMP — L-BFGS needs float32 for Hessian approx
+                    y_hat, _ = model(
+                        full_y_n, full_t_n, full_dt, full_theta,
+                    )
+                    loss = mse_loss(y_hat, full_y_target)
+                    loss.backward()
+                    return loss
+
+                loss = lbfgs.step(closure)
+                lbfgs_train = loss.item()
+                history["train_loss"].append(lbfgs_train)
+
+                # Validation
+                model.eval()
+                with torch.no_grad():
+                    vy_hat, _ = model(
+                        val_y_n, val_t_n, val_dt_t, val_theta,
+                    )
+                    lbfgs_val = mse_loss(vy_hat, val_y_target).item()
+                history["val_loss"].append(lbfgs_val)
+                model.train()
+
+                if step % 10 == 0 or step == lbfgs_steps - 1:
+                    mem_info = ""
+                    if self.device.type == "cuda":
+                        mem_used = torch.cuda.memory_allocated(self.device) / 1e6
+                        mem_reserved = torch.cuda.memory_reserved(self.device) / 1e6
+                        mem_info = f", GPU_mem={mem_used:.0f}/{mem_reserved:.0f}MB"
+                    logger.info(
+                        "L-BFGS %d/%d: train=%.6f, val=%.6f%s",
+                        step, lbfgs_steps, lbfgs_train, lbfgs_val, mem_info,
+                    )
+
+            # Free full-batch tensors
+            del full_y_n, full_t_n, full_dt, full_theta, full_y_target
+            del val_y_n, val_t_n, val_dt_t, val_theta, val_y_target
 
         total_time = time.time() - train_start
         logger.info("Training complete! Total time: %.1fs (%.1f min)",

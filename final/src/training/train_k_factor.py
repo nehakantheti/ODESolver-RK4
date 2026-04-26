@@ -104,6 +104,7 @@ class KFactorTrainer:
         hidden_dim: int = 96,
         val_fraction: float = 0.2,
         use_compile: bool = True,
+        lbfgs_steps: int = 50,
     ) -> Tuple[KFactorResidualNet, Dict[str, List[float]]]:
         """Train the k-factor residual network end-to-end.
 
@@ -125,6 +126,9 @@ class KFactorTrainer:
             val_fraction: Fraction of data held out for validation.
             use_compile: Whether to use ``torch.compile`` for kernel
                         fusion.  Requires PyTorch ≥ 2.0.
+            lbfgs_steps: Number of L-BFGS fine-tuning steps after Adam.
+                        Uses full-batch second-order optimisation with
+                        strong Wolfe line search.  Set to 0 to disable.
 
         Returns:
             Tuple of (trained_model, history_dict).
@@ -283,6 +287,82 @@ class KFactorTrainer:
                     epoch, epochs, avg_train_loss, avg_val_loss,
                     scheduler.get_last_lr()[0], mem_info,
                 )
+
+        # -- Stage 2: L-BFGS fine-tuning (hybrid optimizer) ------------------
+        if lbfgs_steps > 0:
+            logger.info(
+                "L-BFGS fine-tuning: %d steps (lr=1.0, history=10, "
+                "strong_wolfe)...",
+                lbfgs_steps,
+            )
+
+            # Full-batch training data for L-BFGS
+            fk1 = data.k1[train_idx].to(self.device)
+            fy_n = data.y_n[train_idx].to(self.device)
+            ft_n = data.t_n[train_idx].to(self.device)
+            fh = data.h[train_idx].to(self.device)
+            fd2 = delta_2_target[train_idx].to(self.device)
+            fd3 = delta_3_target[train_idx].to(self.device)
+            fd4 = delta_4_target[train_idx].to(self.device)
+
+            # Full-batch validation data
+            vk1 = data.k1[val_idx].to(self.device)
+            vy_n = data.y_n[val_idx].to(self.device)
+            vt_n = data.t_n[val_idx].to(self.device)
+            vh = data.h[val_idx].to(self.device)
+            vd2 = delta_2_target[val_idx].to(self.device)
+            vd3 = delta_3_target[val_idx].to(self.device)
+            vd4 = delta_4_target[val_idx].to(self.device)
+
+            lbfgs = torch.optim.LBFGS(
+                model.parameters(),
+                lr=1.0,
+                history_size=10,
+                max_iter=20,
+                line_search_fn="strong_wolfe",
+            )
+
+            model.train()
+            for step in range(lbfgs_steps):
+                def closure():
+                    lbfgs.zero_grad()
+                    d2p, d3p, d4p = model(fk1, fy_n, ft_n, fh)
+                    loss = (
+                        mse_loss(d2p, fd2)
+                        + mse_loss(d3p, fd3)
+                        + mse_loss(d4p, fd4)
+                    )
+                    loss.backward()
+                    return loss
+
+                loss = lbfgs.step(closure)
+                lbfgs_train = loss.item()
+                history["train_loss"].append(lbfgs_train)
+
+                model.eval()
+                with torch.no_grad():
+                    vd2p, vd3p, vd4p = model(vk1, vy_n, vt_n, vh)
+                    lbfgs_val = (
+                        mse_loss(vd2p, vd2)
+                        + mse_loss(vd3p, vd3)
+                        + mse_loss(vd4p, vd4)
+                    ).item()
+                history["val_loss"].append(lbfgs_val)
+                model.train()
+
+                if step % 10 == 0 or step == lbfgs_steps - 1:
+                    mem_info = ""
+                    if self.device.type == "cuda":
+                        mem_used = torch.cuda.memory_allocated(self.device) / 1e6
+                        mem_reserved = torch.cuda.memory_reserved(self.device) / 1e6
+                        mem_info = f", GPU_mem={mem_used:.0f}/{mem_reserved:.0f}MB"
+                    logger.info(
+                        "L-BFGS %d/%d: train=%.6f, val=%.6f%s",
+                        step, lbfgs_steps, lbfgs_train, lbfgs_val, mem_info,
+                    )
+
+            del fk1, fy_n, ft_n, fh, fd2, fd3, fd4
+            del vk1, vy_n, vt_n, vh, vd2, vd3, vd4
 
         total_time = time.time() - train_start
         logger.info("Training complete! Total time: %.1fs (%.1f min)",

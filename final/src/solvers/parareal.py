@@ -207,6 +207,7 @@ class PararealSolver:
             dt=dt, params=params,
         )
 
+    @torch.inference_mode()
     def solve(
         self,
         f: DerivativeFunc,

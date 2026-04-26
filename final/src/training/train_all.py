@@ -117,6 +117,7 @@ class TrainingOrchestrator:
         coarse_dt: float = 0.1,
         fine_dt: float = 0.001,
         kfactor_dt: float = 0.01,
+        lbfgs_steps: int = 50,
     ) -> TrainedModels:
         """Train all neural components end-to-end.
 
@@ -135,6 +136,8 @@ class TrainingOrchestrator:
             coarse_dt: Coarse time step for the coarse propagator.
             fine_dt: Fine RK4 step for ground truth generation.
             kfactor_dt: Step size for k-factor data generation.
+            lbfgs_steps: Number of L-BFGS fine-tuning steps after Adam
+                        for both networks.  Set to 0 to disable.
 
         Returns:
             ``TrainedModels`` containing both trained models.
@@ -156,6 +159,7 @@ class TrainingOrchestrator:
             coarse_dt=coarse_dt,
             epochs=coarse_epochs,
             hidden_dim=coarse_hidden,
+            lbfgs_steps=lbfgs_steps,
         )
 
         # Free GPU memory before training the next model
@@ -181,6 +185,7 @@ class TrainingOrchestrator:
             dt=kfactor_dt,
             epochs=kfactor_epochs,
             hidden_dim=kfactor_hidden,
+            lbfgs_steps=lbfgs_steps,
         )
 
         # Save k-factor model
@@ -242,6 +247,10 @@ def main():
         choices=["cpu", "cuda"],
         help="Force training device. Defaults to CUDA if available.",
     )
+    parser.add_argument(
+        "--lbfgs-steps", type=int, default=50,
+        help="L-BFGS fine-tuning steps after Adam (0 to disable).",
+    )
     args = parser.parse_args()
 
     # Configure logging
@@ -257,6 +266,7 @@ def main():
         n_trajectories=args.n_trajectories,
         coarse_epochs=args.coarse_epochs,
         kfactor_epochs=args.kfactor_epochs,
+        lbfgs_steps=args.lbfgs_steps,
     )
 
 
