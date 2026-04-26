@@ -372,7 +372,7 @@ with tab2:
             trust_gate=TrustGate(initial_threshold=0.1, decay_rate=0.7),
             max_iterations=30,
             system_name=system_name,
-            n_workers=os.cpu_count() or 4,
+            n_workers=0,
         )
 
         para_result = parareal_solver.solve(

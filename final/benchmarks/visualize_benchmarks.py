@@ -230,7 +230,7 @@ def chart_parareal_speedup(system, model, fine_dts=[0.01, 0.001]):
                 trust_gate=TrustGate(initial_threshold=0.1),
                 max_iterations=50,
                 system_name="damped_oscillator",
-                n_workers=os.cpu_count() or 4,
+                n_workers=0,
             )
 
             def _para():
@@ -307,7 +307,7 @@ def chart_convergence(system, model, slab_counts=[4, 8, 16]):
             trust_gate=TrustGate(initial_threshold=0.1),
             max_iterations=50,
             system_name="damped_oscillator",
-            n_workers=os.cpu_count() or 4,
+            n_workers=0,
         )
         result = parareal.solve(
             f=system.f, y0=y0, t_span=t_span,
@@ -438,7 +438,7 @@ def chart_error_vs_speedup(system, model):
                 trust_gate=TrustGate(initial_threshold=0.1),
                 max_iterations=50,
                 system_name="damped_oscillator",
-                n_workers=os.cpu_count() or 4,
+                n_workers=0,
             )
 
             def _para():
