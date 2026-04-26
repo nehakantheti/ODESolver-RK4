@@ -617,3 +617,95 @@ py -3.11 benchmarks/visualize_benchmarks.py
 ```bash
 py -3.11 benchmarks/benchmark_solvers.py
 ```
+
+---
+
+## Phase 8 — True Parallelism: CPU Multiprocessing Fine Pass
+
+### 8.1 Root Cause: GPU Kernel Launch Overhead
+
+**Problem discovered from Phase 7 benchmarks**:
+
+| Method | 20K steps | 50K steps | Relative |
+|--------|-----------|-----------|----------|
+| CPU serial RK4 | 4,358ms | 24,417ms | **1.0×** (baseline) |
+| GPU serial RK4 | 18,058ms | 89,913ms | **4.2× slower** |
+| Parareal (GPU fine) | 14,042ms | — | **3.2× slower** |
+
+**Why GPU is slower for RK4**: Each RK4 step launches 5 CUDA kernels (one per k-factor evaluation + update). For a 2D ODE system, each kernel computes ~50ns of arithmetic but costs ~20μs to launch — **400× overhead**.
+
+`torch.vmap` batches the P slabs into one kernel per step, but the Python `for` loop over steps still launches thousands of sequential kernels.
+
+### 8.2 The Fix: CPU Fine Solver + ProcessPoolExecutor
+
+**Two changes**:
+
+1. **Fine solver on CPU** (`ClassicalRK4Solver(device=cpu)`):
+   - Eliminates GPU kernel launch overhead entirely
+   - CPU operates via direct memory access, no kernel dispatch
+
+2. **`concurrent.futures.ProcessPoolExecutor`** for true multi-core parallelism:
+   - Each slab's RK4 solve runs in a separate OS process
+   - `n_workers = os.cpu_count()` for maximum parallelism
+   - Workers are created once and reused across all Parareal iterations
+
+**Architecture after fix**:
+```
+PararealSolver
+├── Coarse NN pass:     GPU  (fast NN forward passes)
+├── Fine RK4 pass:      CPU  (ProcessPoolExecutor, n_workers processes)
+│   ├── Worker 0: slab 0 → CPU core 0
+│   ├── Worker 1: slab 1 → CPU core 1
+│   ├── ...
+│   └── Worker P: slab P → CPU core P
+├── Correction:         GPU  (tensor arithmetic)
+└── Data transfer:      CPU↔GPU (P × dim floats, negligible)
+```
+
+### 8.3 Worker Function Design (Windows-compatible)
+
+The fine solve worker is a **module-level function** (picklable for `spawn` on Windows):
+
+```python
+def _fine_solve_worker(system_name, y0_list, t_start, t_end, dt, params):
+    # Re-import in child process (Windows spawn)
+    from src.ode_systems import get_system
+    system = get_system(system_name)
+    # Run pure CPU RK4, return Python list
+    ...
+    return y.tolist()
+```
+
+Key decisions:
+- **No torch.Tensor in arguments**: Python lists + dicts only → pickle-safe
+- **system_name, not f**: ODE function is reconstructed via registry → avoids method pickling
+- **ProcessPoolExecutor, not Pool**: Higher-level API with better error handling
+- **Pool created once in __init__**: Workers persist across Parareal iterations
+
+### 8.4 Projected Performance
+
+For dt=0.0001 (200K steps, serial CPU = 357s):
+
+| Config | Fine pass time | K iters | Total | Speedup |
+|--------|---------------|---------|-------|---------|
+| Serial CPU | — | — | 357s | 1.0× |
+| Parareal GPU fine (old) | 22.3s/iter | 5 | 115s | 3.1× |
+| Parareal CPU multiproc (new) | ~2.8s/iter | 5 | ~16s | **~22×** |
+
+### 8.5 Files Modified
+
+| File | Change |
+|------|--------|
+| `src/solvers/parareal.py` | CPU fine solver + ProcessPoolExecutor + `_fine_solve_worker` |
+| `benchmarks/benchmark_solvers.py` | Pass `system_name` + `n_workers` |
+| `benchmarks/visualize_benchmarks.py` | Pass `system_name` + `n_workers` |
+| `demo/app.py` | Pass `system_name` + `n_workers` |
+
+### 8.6 New PararealSolver Parameters
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `n_workers` | 0 | 0 = CPU vmap (single process). >1 = ProcessPoolExecutor |
+| `system_name` | "" | ODE registry name for worker process reconstruction |
+
+53/53 tests pass.

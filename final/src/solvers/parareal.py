@@ -45,6 +45,47 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Module-level worker for ProcessPoolExecutor (must be picklable)
+# ---------------------------------------------------------------------------
+
+def _fine_solve_worker(system_name, y0_list, t_start, t_end, dt, params):
+    """RK4 fine solve for one slab on CPU.
+
+    This function is called by ``ProcessPoolExecutor`` in a separate
+    process.  It reconstructs the ODE system from its registry name
+    (avoiding pickling issues with bound methods), runs a full sequential
+    RK4 integration, and returns the endpoint as a Python list.
+
+    Args:
+        system_name: Registry name of the ODE system.
+        y0_list: Initial condition as a Python list.
+        t_start: Start time of the slab.
+        t_end: End time of the slab.
+        dt: Fine time step.
+        params: ODE parameter dictionary.
+
+    Returns:
+        Final state as a Python list.
+    """
+    import torch
+    from src.ode_systems import get_system
+
+    system = get_system(system_name)
+    y = torch.tensor(y0_list, dtype=torch.float32)
+    n_steps = int(round((t_end - t_start) / dt))
+
+    for i in range(n_steps):
+        t = t_start + i * dt
+        k1 = dt * system.f(t, y, params)
+        k2 = dt * system.f(t + dt / 2, y + k1 / 2, params)
+        k3 = dt * system.f(t + dt / 2, y + k2 / 2, params)
+        k4 = dt * system.f(t + dt, y + k3, params)
+        y = y + (k1 + 2 * k2 + 2 * k3 + k4) / 6
+
+    return y.tolist()
+
+
+# ---------------------------------------------------------------------------
 # Result container
 # ---------------------------------------------------------------------------
 
@@ -108,12 +149,14 @@ class PararealSolver:
         trust_gate: TrustGate | None = None,
         max_iterations: int = 50,
         coarse_dt: float = 0.1,
+        n_workers: int = 0,
+        system_name: str = "",
     ):
         """Initialise the Parareal solver.
 
         Args:
             coarse_net: Trained neural coarse propagator.
-            device: Torch device.  Defaults to CPU.
+            device: Torch device for the coarse NN.  Defaults to CPU.
             trust_gate: Adaptive trust gate instance.  If ``None``, a
                        default gate is created.
             max_iterations: Maximum number of Parareal iterations before
@@ -123,18 +166,47 @@ class PararealSolver:
                       (default 0.1).  The coarse propagator walks through
                       each slab in increments of this size, calling the NN
                       once per step.
+            n_workers: Number of CPU worker processes for the fine pass.
+                      0 = CPU vmap (single-process, still fast).
+                      >1 = true multi-core parallelism via
+                      ``ProcessPoolExecutor``.
+            system_name: ODE system registry name (needed for
+                        multiprocessing workers to reconstruct the system).
         """
         self.coarse_net = coarse_net
         self.device = device or torch.device("cpu")
-        self.fine_solver = ClassicalRK4Solver(device=self.device)
+        # Fine solver always on CPU: eliminates GPU kernel launch overhead
+        # that makes sequential GPU RK4 ~4× slower than CPU.
+        self.fine_solver = ClassicalRK4Solver(device=torch.device("cpu"))
         self.trust_gate = trust_gate or TrustGate()
         self.max_iterations = max_iterations
         self.coarse_dt = coarse_dt
+        self.system_name = system_name
+        self.n_workers = n_workers
+        self._pool = None
+
+        if n_workers > 1 and system_name:
+            from concurrent.futures import ProcessPoolExecutor
+            self._pool = ProcessPoolExecutor(max_workers=n_workers)
+            logger.info(
+                "ProcessPool created: %d CPU workers for fine pass",
+                n_workers,
+            )
 
         logger.info(
-            "PararealSolver initialised: device=%s, max_iter=%d, coarse_dt=%.3f",
-            self.device, max_iterations, coarse_dt,
+            "PararealSolver initialised: device=%s, max_iter=%d, "
+            "coarse_dt=%.3f, fine_solver=CPU, n_workers=%d",
+            self.device, max_iterations, coarse_dt, n_workers,
         )
+
+    def shutdown(self):
+        """Shut down the process pool (if any)."""
+        if self._pool is not None:
+            self._pool.shutdown(wait=False)
+            self._pool = None
+
+    def __del__(self):
+        self.shutdown()
 
     def _coarse_propagate(
         self,
@@ -321,22 +393,39 @@ class PararealSolver:
                 k, n_fine_this_iter, n_slabs,
             )
 
-            # Run fine solver on active slabs (batched GPU execution).
-            # All slab intervals have equal width delta_t.  For autonomous
-            # ODEs (f does not depend on t), we can batch all ICs with a
-            # shared t_span = (0, delta_t) and solve in one GPU kernel.
+            # Run fine solver on active slabs.
+            # STRATEGY: fine pass runs on CPU (avoids GPU kernel overhead).
+            # - n_workers>1: ProcessPoolExecutor (true multi-core parallelism)
+            # - n_workers=0: CPU vmap (single-process, still avoids GPU overhead)
             active_idx = fine_mask.nonzero(as_tuple=True)[0]
 
             if len(active_idx) > 0:
-                active_y0 = U_old[active_idx]
-                endpoints = self.fine_solver.solve_batched_endpoints(
-                    f=f,
-                    y0_batch=active_y0,
-                    t_span=(0.0, delta_t),
-                    dt=fine_dt,
-                    params=params,
-                )
-                F_values[active_idx] = endpoints
+                if self._pool is not None and len(active_idx) > 1:
+                    # ---- True parallel: ProcessPoolExecutor on CPU ----
+                    futures = []
+                    for idx in active_idx:
+                        y0 = U_old[idx.item()].cpu().tolist()
+                        futures.append(self._pool.submit(
+                            _fine_solve_worker,
+                            self.system_name, y0,
+                            0.0, delta_t, fine_dt, params,
+                        ))
+                    for i, idx in enumerate(active_idx):
+                        result = futures[i].result()
+                        F_values[idx] = torch.tensor(
+                            result, device=self.device, dtype=torch.float32,
+                        )
+                else:
+                    # ---- CPU vmap (single process, no GPU overhead) ----
+                    active_y0 = U_old[active_idx].cpu()
+                    endpoints = self.fine_solver.solve_batched_endpoints(
+                        f=f,
+                        y0_batch=active_y0,
+                        t_span=(0.0, delta_t),
+                        dt=fine_dt,
+                        params=params,
+                    )
+                    F_values[active_idx] = endpoints.to(self.device)
 
             # Fill skipped slabs with cached coarse predictions
             skipped_idx = (~fine_mask).nonzero(as_tuple=True)[0]

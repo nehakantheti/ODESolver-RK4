@@ -371,6 +371,8 @@ with tab2:
             device=device,
             trust_gate=TrustGate(initial_threshold=0.1, decay_rate=0.7),
             max_iterations=30,
+            system_name=system_name,
+            n_workers=os.cpu_count() or 4,
         )
 
         para_result = parareal_solver.solve(
@@ -467,6 +469,8 @@ with tab3:
             parareal_solver = PararealSolver(
                 coarse_net=model, device=device,
                 trust_gate=TrustGate(initial_threshold=0.1, decay_rate=0.7),
+                system_name=system_name,
+                n_workers=os.cpu_count() or 4,
             )
             result = parareal_solver.solve(
                 f=system.f, y0=y0,

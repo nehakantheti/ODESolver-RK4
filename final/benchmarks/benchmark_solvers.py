@@ -196,6 +196,8 @@ def benchmark_parareal_slabs():
             coarse_net=model, device=DEVICE,
             trust_gate=TrustGate(initial_threshold=0.1),
             max_iterations=30,
+            system_name="damped_oscillator",
+            n_workers=os.cpu_count() or 4,
         )
 
         def _parareal_run():
@@ -288,6 +290,8 @@ def benchmark_parareal_hard():
             coarse_net=model, device=DEVICE,
             trust_gate=TrustGate(initial_threshold=0.1),
             max_iterations=50,
+            system_name="damped_oscillator",
+            n_workers=os.cpu_count() or 4,
         )
 
         def _parareal_run():
