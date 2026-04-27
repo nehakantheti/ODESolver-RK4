@@ -375,11 +375,11 @@ class PararealSolver:
 
             # Determine which slabs need fine correction
             if use_trust_gate and k > 0:
-                error_estimates = 1.0 - confidences
+                # Convergence-based: locked slabs are skipped
+                error_estimates = 1.0 - confidences  # for stats only
                 fine_mask = self.trust_gate.should_run_fine(error_estimates)
                 gate_stats = self.trust_gate.get_stats(error_estimates)
                 gate_stats_list.append(gate_stats)
-                self.trust_gate.update_threshold(k)
             else:
                 fine_mask = torch.ones(n_slabs, dtype=torch.bool,
                                        device=self.device)
@@ -450,11 +450,24 @@ class PararealSolver:
             max_change = torch.max(torch.abs(U - U_old)).item()
             convergence_history.append(max_change)
 
+            # Compute per-slab changes and update trust gate locks
+            if use_trust_gate:
+                slab_changes = torch.zeros(n_slabs, device=self.device)
+                for n in range(n_slabs):
+                    slab_changes[n] = torch.max(
+                        torch.abs(U[n + 1] - U_old[n + 1])
+                    ).item()
+                self.trust_gate.update_locks(slab_changes)
+
+            n_locked = (self.trust_gate.locked.sum().item()
+                        if self.trust_gate.locked is not None else 0)
+
             logger.info(
                 "Parareal iter %d: max_change=%.2e, fine_solves=%d/%d, "
-                "trust_rate=%.1f%%",
+                "locked=%d/%d (trust=%.0f%%)",
                 k, max_change, n_fine_this_iter, n_slabs,
-                gate_stats_list[-1].get("trust_rate", 0) * 100,
+                n_locked, n_slabs,
+                n_locked / max(n_slabs, 1) * 100,
             )
 
             if max_change < tolerance:

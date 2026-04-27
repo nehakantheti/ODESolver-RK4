@@ -709,3 +709,40 @@ For dt=0.0001 (200K steps, serial CPU = 357s):
 | `system_name` | "" | ODE registry name for worker process reconstruction |
 
 53/53 tests pass.
+
+### 8.7 Trust Gate Overhaul: Confidence → Convergence-Based Slab Locking
+
+**Root cause of trust_rate=0%**:
+
+Three bugs in the original TrustGate:
+
+1. **Confidence head never trained**: The training loss only supervised the state head (`mse_loss(y_hat, y_target)`). The confidence head received zero gradient → output ≈ 0.5 (random sigmoid).
+2. **Error estimate always high**: `error_estimate = 1 - confidence ≈ 0.5`, which exceeded every threshold → ALL slabs triggered fine correction → trust_rate = 0%.
+3. **Threshold decayed wrong way**: Decreased over iterations (stricter), but should have increased (more permissive as Parareal converges).
+
+**Fix — convergence-based slab locking**:
+
+Instead of relying on the NN's (untrained) confidence, the gate now uses the **actual per-slab correction magnitude** `|U_n^{k+1} - U_n^k|`:
+
+```python
+# After each Parareal iteration:
+slab_changes[n] = max|U[n+1] - U_old[n+1]|
+
+# Lock slabs whose corrections are below lock_threshold
+if slab_changes[n] < lock_threshold for lock_patience consecutive iters:
+    locked[n] = True  → skip fine solve
+```
+
+This is the standard approach in Parareal literature (Lions, Maday, Turinici 2001):
+- Leading slabs (near t=0) converge first → locked → skipped
+- Tail slabs (near t_end) converge last
+- Locked slabs automatically unlock if upstream corrections propagate
+
+| Feature | Old (broken) | New (convergence) |
+|---------|-------------|-------------------|
+| Signal | NN confidence head | Per-slab `\|ΔU\|` |
+| Decision | `1-conf >= threshold` | `\|ΔU\| < lock_threshold` |
+| Threshold | Decayed (stricter) | Fixed per slab |
+| Result | 0% trust rate | Slabs lock progressively |
+
+54/54 tests pass (+1 new: test_patience).

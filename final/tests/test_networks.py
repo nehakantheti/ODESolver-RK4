@@ -200,61 +200,83 @@ class TestKFactorResidualNet:
 # ---------------------------------------------------------------------------
 
 class TestTrustGate:
-    """Tests for the adaptive trust gate."""
+    """Tests for the convergence-based trust gate."""
 
     @pytest.fixture
     def gate(self) -> TrustGate:
-        """Create a trust gate with default settings."""
-        return TrustGate(initial_threshold=0.1, decay_rate=0.8)
+        """Create a trust gate with lock_threshold=1e-4, patience=1."""
+        return TrustGate(lock_threshold=1e-4, lock_patience=1)
 
-    def test_high_error_triggers_fine(self, gate):
-        """Slabs with high error should require fine correction."""
-        errors = torch.tensor([0.5, 0.2, 0.05, 0.01])
-        mask = gate.should_run_fine(errors)
+    def test_locks_converged_slabs(self, gate):
+        """Slabs with small corrections should become locked."""
+        # Slab 1 and 2 have small changes (< 1e-4), slabs 0 and 3 are large
+        slab_changes = torch.tensor([1e-2, 3e-5, 5e-6, 2e-1])
+        gate.update_locks(slab_changes)
 
-        # threshold=0.1, so errors 0.5 and 0.2 should trigger fine
-        assert mask[0].item() is True   # 0.5 >= 0.1
-        assert mask[1].item() is True   # 0.2 >= 0.1
-        assert mask[2].item() is False  # 0.05 < 0.1
-        assert mask[3].item() is False  # 0.01 < 0.1
+        assert gate.locked[0].item() is False   # 1e-2 >= 1e-4
+        assert gate.locked[1].item() is True    # 3e-5 < 1e-4
+        assert gate.locked[2].item() is True    # 5e-6 < 1e-4
+        assert gate.locked[3].item() is False   # 2e-1 >= 1e-4
 
-    def test_threshold_decay(self, gate):
-        """Threshold should decay geometrically with iterations."""
-        initial = gate.threshold
-        gate.update_threshold(iteration=1)
-        assert gate.threshold < initial
-        assert abs(gate.threshold - initial * 0.8) < 1e-6
+    def test_should_run_fine_skips_locked(self, gate):
+        """should_run_fine should return False for locked slabs."""
+        slab_changes = torch.tensor([1e-2, 3e-5, 5e-6, 2e-1])
+        gate.update_locks(slab_changes)
 
-        gate.update_threshold(iteration=3)
-        expected = 0.1 * (0.8 ** 3)
-        assert abs(gate.threshold - expected) < 1e-6
+        mask = gate.should_run_fine(slab_changes)
+        # mask=True means "needs fine", so locked slabs should be False
+        assert mask[0].item() is True    # not locked
+        assert mask[1].item() is False   # locked
+        assert mask[2].item() is False   # locked
+        assert mask[3].item() is True    # not locked
 
-    def test_threshold_floor(self):
-        """Threshold should not go below min_threshold."""
-        gate = TrustGate(initial_threshold=0.1, decay_rate=0.1,
-                         min_threshold=0.01)
-        gate.update_threshold(iteration=100)  # Would go to ~1e-101
-        assert gate.threshold >= 0.01
+    def test_unlock_on_correction_growth(self, gate):
+        """Locked slabs should unlock if their correction grows."""
+        # First: lock slabs 1 and 2
+        gate.update_locks(torch.tensor([1e-2, 3e-5, 5e-6, 2e-1]))
+        assert gate.locked[1].item() is True
+
+        # Then: upstream correction propagates, slab 1 grows
+        gate.update_locks(torch.tensor([1e-2, 5e-2, 5e-6, 2e-1]))
+        assert gate.locked[1].item() is False  # unlocked!
+        assert gate.locked[2].item() is True   # still locked
+
+    def test_patience(self):
+        """Slabs should only lock after patience consecutive iterations."""
+        gate = TrustGate(lock_threshold=1e-4, lock_patience=2)
+
+        # Iteration 1: below threshold, streak=1
+        gate.update_locks(torch.tensor([1e-5, 1e-5]))
+        assert gate.locked[0].item() is False  # patience=2, only 1 iter
+
+        # Iteration 2: below threshold again, streak=2 >= patience
+        gate.update_locks(torch.tensor([1e-5, 1e-5]))
+        assert gate.locked[0].item() is True   # now locked
 
     def test_reset(self, gate):
-        """reset() should restore the initial threshold."""
-        gate.update_threshold(iteration=5)
-        assert gate.threshold < gate.initial_threshold
+        """reset() should clear all locks."""
+        gate.update_locks(torch.tensor([1e-5, 1e-5, 1e-5]))
+        assert gate.locked.sum().item() == 3
 
         gate.reset()
-        assert gate.threshold == gate.initial_threshold
+        assert gate.locked is None
 
     def test_stats_output(self, gate):
         """get_stats should return all expected keys."""
-        errors = torch.tensor([0.5, 0.2, 0.05, 0.01])
-        stats = gate.get_stats(errors)
+        slab_changes = torch.tensor([1e-2, 3e-5, 5e-6, 2e-1])
+        gate.update_locks(slab_changes)
+
+        stats = gate.get_stats(slab_changes)
 
         expected_keys = {"threshold", "n_slabs", "n_trusted",
                         "n_corrected", "trust_rate", "mean_error",
-                        "max_error"}
+                        "max_error", "locked_slabs"}
         assert set(stats.keys()) == expected_keys
         assert stats["n_slabs"] == 4
+        assert stats["n_trusted"] == 2  # slabs 1 and 2
+        assert stats["n_corrected"] == 2  # slabs 0 and 3
         assert stats["n_trusted"] + stats["n_corrected"] == 4
+        assert stats["trust_rate"] == 0.5  # 2/4
 
 
 # ---------------------------------------------------------------------------
