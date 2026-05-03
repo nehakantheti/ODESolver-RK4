@@ -746,3 +746,151 @@ This is the standard approach in Parareal literature (Lions, Maday, Turinici 200
 | Result | 0% trust rate | Slabs lock progressively |
 
 54/54 tests pass (+1 new: test_patience).
+
+---
+
+## Phase 9 — Derivative-Based Coarse Propagator + Physics-Informed Training + Classical Baselines
+
+### 9.1 CoarsePropagatorNet: Derivative Prediction (CRITICAL ARCHITECTURAL FIX)
+
+**The fundamental flaw** in the original architecture: the network learned
+`(y_n, t, dt, θ) → y_{n+1}` — a direct state jump.  This is wrong because:
+
+1. **dt-dependent**: Retraining required for different step sizes.
+2. **Physics-misaligned**: ODEs define `dy/dt`, not jumps.
+3. **Compounding error**: Multi-step propagation amplifies error exponentially.
+
+**Fix**: Network now predicts the ODE vector field:
+
+```
+(y_n, t, θ) → f̂(y, t, θ)    [learned derivative]
+y_{n+1} = y_n + dt * f̂       [integration done externally]
+```
+
+**Changes to `src/networks/coarse_propagator.py`**:
+- **Removed** `delta_t` from input: `input_dim = D + 1 + P` (was `D + 2 + P`)
+- **Removed** confidence head entirely (never trained, already replaced by convergence gating)
+- **Output**: `derivative_head → f̂(y, t, θ)` shape `(D,)`
+- **Added** `integrate_euler()` and `integrate_rk2()` convenience methods
+- **Added** Xavier small-weight init for derivative head (stable training start)
+
+### 9.2 KFactorResidualNet: θ Parameter Conditioning
+
+**Problem**: The k-factor network was blind to which ODE system it was solving.
+This is inconsistent with the meta-learning design.
+
+**Fix**: Added `param_dim` constructor argument and `theta_ode` to all forward calls:
+- Input: `[k1 (D), y_n (D), t_n (1), h (1), θ (P)]` → `2D + 2 + P`
+- Backward-compatible: `param_dim=0` and `theta_ode=None` defaults
+
+### 9.3 Physics-Informed Training Loss (PINN-Parareal Hybrid)
+
+**New loss function** (adapted from user's PINN research):
+
+```
+L = MSE(f̂, f_true)                     [derivative matching — primary]
+  + λ_phys * ||trapezoidal_residual||²  [physics consistency — regulariser]
+```
+
+**Trapezoidal residual** (2nd-order implicit constraint):
+```
+y_pred = y_n + dt * f̂(y_n, t_n, θ)           [Euler step with learned f̂]
+residual = (y_pred - y_n) - dt/2 * [f(t_n, y_n) + f(t_n+dt, y_pred)]
+```
+
+**Hybrid optimizer schedule**:
+| Phase | Optimizer | λ_phys | Rationale |
+|-------|-----------|--------|-----------|
+| Adam | Adam + CosineAnnealing | 0.01 | Low physics weight → find basin |
+| L-BFGS | L-BFGS + strong Wolfe | 1.0 | High physics weight → polish |
+
+### 9.4 Training Data: Derivative Targets + Randomized dt
+
+**Changes to `src/training/data_generator.py`**:
+
+- `CoarseTrainingData` now includes `f_true` field: exact derivative at each sample point
+- `f_true = system.f(t_n, y_n, params)` — computed analytically from the ODE
+- **Randomized dt** ∈ [0.05, 0.2] per trajectory for step-size robustness
+- `KFactorTrainingData` now includes `theta_ode` for parameter conditioning
+
+### 9.5 Early Stopping
+
+**Added to `CoarseTrainer`**:
+- Tracks best validation loss across all epochs
+- Stops Adam phase if no improvement for `early_stopping_patience` epochs (default 200)
+- Restores best model weights after early stopping
+- Prevents overfitting and saves compute
+
+### 9.6 Classical Coarse Propagators (Baselines)
+
+**New file**: `src/solvers/classical_coarse.py`
+
+Two classical alternatives pluggable into the same Parareal pipeline:
+
+| Propagator | Method | Expected K | Stability |
+|-----------|--------|-----------|-----------|
+| `EulerCoarse` | `y_{n+1} = y_n + dt * f(y_n)` | K ≈ P | Conditional |
+| `BackwardEulerCoarse` | Fixed-point iteration (5 iters) | K ≈ P/2 | Unconditional |
+
+Both use multi-step integration (step_dt=0.1 by default) and implement the
+`CoarsePropagator` protocol for interchangeable use.
+
+### 9.7 Parareal Solver: Pluggable Coarse Modes
+
+**Rewritten `src/solvers/parareal.py`**:
+
+New `coarse_mode` parameter: `'neural'`, `'euler'`, or `'backward_euler'`
+
+| Coarse Mode | Propagation | Device |
+|-------------|------------|--------|
+| `neural` | Multi-step Euler with learned f̂ | CPU/GPU |
+| `euler` | Multi-step forward Euler with exact f | CPU |
+| `backward_euler` | Multi-step implicit with FP iteration | CPU |
+
+**Fine pass parallelism**: `multiprocessing.Pool` with persistent pre-warmed workers
+(uses `fork` on Linux, `spawn` on Windows). Worker init caches ODE system to avoid
+per-call import overhead.
+
+### 9.8 Comparison Benchmark
+
+**New file**: `benchmarks/benchmark_coarse_comparison.py`
+
+Runs `Parareal(G=Euler)` vs `Parareal(G=BackwardEuler)` vs `Parareal(G=Neural)`:
+- Metrics: K iterations, total fine solves, wall time, error vs RK4, speedup
+- Formatted summary table
+- JSON export for plotting
+
+### 9.9 Files Modified/Created
+
+| File | Action | Key Change |
+|------|--------|------------|
+| `src/networks/coarse_propagator.py` | **Rewritten** | Derivative prediction, removed confidence head |
+| `src/networks/k_factor_residual.py` | **Modified** | Added param_dim + theta_ode |
+| `src/training/data_generator.py` | **Rewritten** | f_true targets, randomized dt, theta in k-factor |
+| `src/training/train_coarse.py` | **Rewritten** | Physics loss, early stopping, derivative matching |
+| `src/training/train_k_factor.py` | **Modified** | theta_ode through all forward calls |
+| `src/solvers/parareal.py` | **Rewritten** | Pluggable coarse modes, multiprocessing Pool |
+| `src/solvers/classical_coarse.py` | **NEW** | Euler + Backward Euler baselines |
+| `benchmarks/benchmark_coarse_comparison.py` | **NEW** | Coarse propagator comparison |
+| `tests/test_networks.py` | **Updated** | All tests for new API |
+
+### 9.10 Project Structure Update
+
+```
+final/
+├── src/
+│   ├── solvers/
+│   │   ├── classical_rk4.py      ✅
+│   │   ├── classical_coarse.py   ✅ NEW — Euler + Backward Euler baselines
+│   │   └── parareal.py           ✅ Rewritten — pluggable coarse modes
+│   ├── networks/
+│   │   ├── coarse_propagator.py  ✅ Rewritten — derivative prediction
+│   │   ├── k_factor_residual.py  ✅ Modified — θ conditioning
+│   │   └── trust_gate.py         ✅ Convergence-based (unchanged)
+│   └── training/
+│       ├── data_generator.py     ✅ Rewritten — f_true + randomized dt
+│       ├── train_coarse.py       ✅ Rewritten — physics loss + early stopping
+│       └── train_k_factor.py     ✅ Modified — θ through all calls
+└── benchmarks/
+    └── benchmark_coarse_comparison.py  ✅ NEW — comparison benchmark
+```

@@ -110,8 +110,8 @@ class TrainingOrchestrator:
     def train_all(
         self,
         n_trajectories: int = 200,
-        coarse_epochs: int = 5000,
-        kfactor_epochs: int = 3000,
+        coarse_epochs: int = 1500,
+        kfactor_epochs: int = 500,
         coarse_hidden: int = 128,
         kfactor_hidden: int = 96,
         coarse_dt: float = 0.1,

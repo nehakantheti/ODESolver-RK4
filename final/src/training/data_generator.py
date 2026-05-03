@@ -3,11 +3,11 @@
 Generates two types of training data by running high-accuracy classical
 RK4 on diverse trajectories (varied initial conditions and ODE parameters):
 
-1. **Coarse propagator data**: (y_n, t_n, delta_t, theta_ODE) → y_{n+1}
-   Pairs for training the meta-propagator to predict state transitions
-   over coarse time steps.
+1. **Coarse propagator data**: (y_n, t_n, theta_ODE) → f_true(y_n, t_n)
+   Pairs for training the derivative-predicting meta-propagator.
+   Also includes delta_t and y_next for physics residual computation.
 
-2. **k-factor data**: (k1, y_n, t_n, h) → (k2, k3, k4)
+2. **k-factor data**: (k1, y_n, t_n, h, theta_ODE) → (k2, k3, k4)
    Pairs for training the k-factor residual network to predict
    corrections to RK4 stages.
 
@@ -16,6 +16,10 @@ Data diversity:
     defined by each ODE system's ``param_ranges()`` method.  This ensures
     the meta-propagator learns a general mapping across the parameter
     family, not just one fixed configuration.
+
+    Additionally, coarse_dt is randomized within [0.05, 0.2] to make
+    the network robust to step size variations during multi-step
+    coarse propagation.
 
 Example:
     >>> from src.ode_systems import get_system
@@ -48,21 +52,25 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CoarseTrainingData:
-    """Training data for the coarse propagator network.
+    """Training data for the derivative-predicting coarse propagator.
 
     All tensors have shape ``(n_samples, ...)``.
 
     Attributes:
         y_n: Current states, shape ``(n_samples, state_dim)``.
         t_n: Current times, shape ``(n_samples, 1)``.
-        delta_t: Coarse time steps, shape ``(n_samples, 1)``.
         theta_ode: ODE parameter vectors, shape ``(n_samples, param_dim)``.
+        f_true: Exact derivatives at (y_n, t_n), shape ``(n_samples, state_dim)``.
+        delta_t: Coarse time steps, shape ``(n_samples, 1)``.
+            Used for physics residual computation during training.
         y_next: Target next states, shape ``(n_samples, state_dim)``.
+            Used for physics residual and validation.
     """
     y_n: Tensor
     t_n: Tensor
-    delta_t: Tensor
     theta_ode: Tensor
+    f_true: Tensor
+    delta_t: Tensor
     y_next: Tensor
 
     def __len__(self) -> int:
@@ -80,8 +88,9 @@ class CoarseTrainingData:
         return CoarseTrainingData(
             y_n=self.y_n.to(device),
             t_n=self.t_n.to(device),
-            delta_t=self.delta_t.to(device),
             theta_ode=self.theta_ode.to(device),
+            f_true=self.f_true.to(device),
+            delta_t=self.delta_t.to(device),
             y_next=self.y_next.to(device),
         )
 
@@ -97,6 +106,7 @@ class KFactorTrainingData:
         y_n: Current states, shape ``(n_samples, state_dim)``.
         t_n: Current times, shape ``(n_samples, 1)``.
         h: Step sizes, shape ``(n_samples, 1)``.
+        theta_ode: ODE parameter vectors, shape ``(n_samples, param_dim)``.
         k2: Target second slopes, shape ``(n_samples, state_dim)``.
         k3: Target third slopes, shape ``(n_samples, state_dim)``.
         k4: Target fourth slopes, shape ``(n_samples, state_dim)``.
@@ -105,6 +115,7 @@ class KFactorTrainingData:
     y_n: Tensor
     t_n: Tensor
     h: Tensor
+    theta_ode: Tensor
     k2: Tensor
     k3: Tensor
     k4: Tensor
@@ -126,6 +137,7 @@ class KFactorTrainingData:
             y_n=self.y_n.to(device),
             t_n=self.t_n.to(device),
             h=self.h.to(device),
+            theta_ode=self.theta_ode.to(device),
             k2=self.k2.to(device),
             k3=self.k3.to(device),
             k4=self.k4.to(device),
@@ -218,20 +230,28 @@ class DataGenerator:
         fine_dt: float = 0.001,
         coarse_dt: float = 0.1,
         ic_scale: float = 0.5,
+        randomize_dt: bool = True,
+        dt_range: Tuple[float, float] = (0.05, 0.2),
     ) -> CoarseTrainingData:
-        """Generate training data for the coarse propagator network.
+        """Generate training data for the derivative-predicting coarse propagator.
 
         For each trajectory:
             1. Sample random IC and ODE parameters.
             2. Run high-accuracy RK4 with step size ``fine_dt``.
-            3. Sub-sample the trajectory at coarse intervals ``coarse_dt``.
-            4. Store (y_n, t_n, coarse_dt, theta_ODE) → y_{n+1} pairs.
+            3. Sub-sample the trajectory at coarse intervals.
+            4. At each sample point, compute the exact derivative
+               f_true = system.f(t_n, y_n, params).
+            5. Store (y_n, t_n, theta_ODE, f_true, delta_t, y_next) tuples.
 
         Args:
             n_trajectories: Number of diverse trajectories to generate.
             fine_dt: Small step size for the ground-truth RK4 solver.
-            coarse_dt: Coarse time step (the jump size the NN must learn).
+            coarse_dt: Base coarse time step.  If ``randomize_dt`` is True,
+                      this is the median of the random range.
             ic_scale: Scale for initial condition perturbation.
+            randomize_dt: If True, randomize the coarse step size per
+                         trajectory to make the model dt-robust.
+            dt_range: (min_dt, max_dt) for randomized coarse steps.
 
         Returns:
             ``CoarseTrainingData`` containing all collected samples.
@@ -240,14 +260,18 @@ class DataGenerator:
 
         all_y_n = []
         all_t_n = []
-        all_delta_t = []
         all_theta = []
+        all_f_true = []
+        all_delta_t = []
         all_y_next = []
 
         logger.info(
             "Generating coarse training data: n_traj=%d, fine_dt=%.4f, "
-            "coarse_dt=%.3f, t=[%.1f, %.1f]",
-            n_trajectories, fine_dt, coarse_dt, t_start, t_end,
+            "coarse_dt=%.3f%s, t=[%.1f, %.1f]",
+            n_trajectories, fine_dt, coarse_dt,
+            f" (randomized [{dt_range[0]:.2f}, {dt_range[1]:.2f}])"
+            if randomize_dt else "",
+            t_start, t_end,
         )
 
         for traj_idx in tqdm(range(n_trajectories), desc="Coarse data"):
@@ -255,6 +279,15 @@ class DataGenerator:
             params = self._sample_params()
             y0 = self._sample_initial_condition(scale=ic_scale)
             theta = self.system.param_vector(params, device=self.device)
+
+            # Choose dt for this trajectory
+            if randomize_dt:
+                traj_dt = (
+                    dt_range[0]
+                    + (dt_range[1] - dt_range[0]) * torch.rand(1).item()
+                )
+            else:
+                traj_dt = coarse_dt
 
             # Run fine RK4
             result = self.solver.solve_single(
@@ -264,25 +297,33 @@ class DataGenerator:
             )
 
             # Sub-sample at coarse intervals
-            coarse_step_ratio = int(coarse_dt / fine_dt)
+            coarse_step_ratio = max(1, int(round(traj_dt / fine_dt)))
             n_fine_steps = result.y.shape[0] - 1
+            actual_dt = coarse_step_ratio * fine_dt
 
             for i in range(0, n_fine_steps - coarse_step_ratio, coarse_step_ratio):
                 y_curr = result.y[i]
                 y_next = result.y[i + coarse_step_ratio]
                 t_curr = result.t[i].item()
 
+                # Compute exact derivative at this point
+                f_exact = self.system.f(t_curr, y_curr, params)
+
                 all_y_n.append(y_curr)
                 all_t_n.append(torch.tensor([t_curr], device=self.device))
-                all_delta_t.append(torch.tensor([coarse_dt], device=self.device))
                 all_theta.append(theta)
+                all_f_true.append(f_exact)
+                all_delta_t.append(
+                    torch.tensor([actual_dt], device=self.device)
+                )
                 all_y_next.append(y_next)
 
         data = CoarseTrainingData(
             y_n=torch.stack(all_y_n),
             t_n=torch.stack(all_t_n),
-            delta_t=torch.stack(all_delta_t),
             theta_ode=torch.stack(all_theta),
+            f_true=torch.stack(all_f_true),
+            delta_t=torch.stack(all_delta_t),
             y_next=torch.stack(all_y_next),
         )
 
@@ -303,7 +344,7 @@ class DataGenerator:
         For each trajectory:
             1. Sample random IC and ODE parameters.
             2. Run RK4 with ``return_k_factors=True``.
-            3. Store (k1, y_n, t_n, h) → (k2, k3, k4) pairs for each step.
+            3. Store (k1, y_n, t_n, h, theta_ode) → (k2, k3, k4) pairs.
 
         Args:
             n_trajectories: Number of diverse trajectories to generate.
@@ -315,7 +356,7 @@ class DataGenerator:
         """
         t_start, t_end = self.system.default_time_span()
 
-        all_k1, all_y_n, all_t_n, all_h = [], [], [], []
+        all_k1, all_y_n, all_t_n, all_h, all_theta = [], [], [], [], []
         all_k2, all_k3, all_k4 = [], [], []
 
         logger.info(
@@ -329,6 +370,7 @@ class DataGenerator:
         for traj_idx in tqdm(range(n_trajectories), desc="K-factor data"):
             params = self._sample_params()
             y0 = self._sample_initial_condition(scale=ic_scale)
+            theta = self.system.param_vector(params, device=self.device)
 
             # Run RK4 with k-factor recording
             result = self.solver.solve_single(
@@ -347,6 +389,7 @@ class DataGenerator:
                 all_y_n.append(y_curr)
                 all_t_n.append(torch.tensor([t_curr], device=self.device))
                 all_h.append(h_tensor)
+                all_theta.append(theta)
                 all_k2.append(k2)
                 all_k3.append(k3)
                 all_k4.append(k4)
@@ -356,6 +399,7 @@ class DataGenerator:
             y_n=torch.stack(all_y_n),
             t_n=torch.stack(all_t_n),
             h=torch.stack(all_h),
+            theta_ode=torch.stack(all_theta),
             k2=torch.stack(all_k2),
             k3=torch.stack(all_k3),
             k4=torch.stack(all_k4),

@@ -176,6 +176,7 @@ class KFactorTrainer:
                 data.y_n[indices].to(self.device),
                 data.t_n[indices].to(self.device),
                 data.h[indices].to(self.device),
+                data.theta_ode[indices].to(self.device),
                 delta_2_target[indices].to(self.device),
                 delta_3_target[indices].to(self.device),
                 delta_4_target[indices].to(self.device),
@@ -191,6 +192,7 @@ class KFactorTrainer:
         logger.info("Step 3/4: Creating k-factor model on %s...", self.device)
         model = KFactorResidualNet(
             state_dim=self.system.dim,
+            param_dim=len(self.system.param_names),
             hidden_dim=hidden_dim,
         ).to(self.device)
 
@@ -231,12 +233,12 @@ class KFactorTrainer:
             epoch_loss = 0.0
             n_batches = 0
 
-            for k1, y_n, t_n, h, d2_true, d3_true, d4_true in train_loader:
+            for k1, y_n, t_n, h, theta, d2_true, d3_true, d4_true in train_loader:
                 optimiser.zero_grad(set_to_none=True)
 
                 # AMP: forward pass in float16 on GPU
                 with autocast(device_type=self.device.type, enabled=self.use_amp):
-                    d2_pred, d3_pred, d4_pred = train_model(k1, y_n, t_n, h)
+                    d2_pred, d3_pred, d4_pred = train_model(k1, y_n, t_n, h, theta)
                     loss = (
                         mse_loss(d2_pred, d2_true)
                         + mse_loss(d3_pred, d3_true)
@@ -261,9 +263,9 @@ class KFactorTrainer:
             n_val_batches = 0
 
             with torch.no_grad():
-                for k1, y_n, t_n, h, d2_true, d3_true, d4_true in val_loader:
+                for k1, y_n, t_n, h, theta, d2_true, d3_true, d4_true in val_loader:
                     with autocast(device_type=self.device.type, enabled=self.use_amp):
-                        d2_p, d3_p, d4_p = train_model(k1, y_n, t_n, h)
+                        d2_p, d3_p, d4_p = train_model(k1, y_n, t_n, h, theta)
                         val_loss += (
                             mse_loss(d2_p, d2_true)
                             + mse_loss(d3_p, d3_true)
@@ -274,7 +276,7 @@ class KFactorTrainer:
             avg_val_loss = val_loss / max(n_val_batches, 1)
             history["val_loss"].append(avg_val_loss)
 
-            if epoch % 500 == 0 or epoch == epochs - 1:
+            if epoch % 50 == 0 or epoch == epochs - 1:
                 # GPU memory logging
                 mem_info = ""
                 if self.device.type == "cuda":
@@ -301,6 +303,7 @@ class KFactorTrainer:
             fy_n = data.y_n[train_idx].to(self.device)
             ft_n = data.t_n[train_idx].to(self.device)
             fh = data.h[train_idx].to(self.device)
+            ftheta = data.theta_ode[train_idx].to(self.device)
             fd2 = delta_2_target[train_idx].to(self.device)
             fd3 = delta_3_target[train_idx].to(self.device)
             fd4 = delta_4_target[train_idx].to(self.device)
@@ -310,6 +313,7 @@ class KFactorTrainer:
             vy_n = data.y_n[val_idx].to(self.device)
             vt_n = data.t_n[val_idx].to(self.device)
             vh = data.h[val_idx].to(self.device)
+            vtheta = data.theta_ode[val_idx].to(self.device)
             vd2 = delta_2_target[val_idx].to(self.device)
             vd3 = delta_3_target[val_idx].to(self.device)
             vd4 = delta_4_target[val_idx].to(self.device)
@@ -326,7 +330,7 @@ class KFactorTrainer:
             for step in range(lbfgs_steps):
                 def closure():
                     lbfgs.zero_grad()
-                    d2p, d3p, d4p = model(fk1, fy_n, ft_n, fh)
+                    d2p, d3p, d4p = model(fk1, fy_n, ft_n, fh, ftheta)
                     loss = (
                         mse_loss(d2p, fd2)
                         + mse_loss(d3p, fd3)
@@ -341,7 +345,7 @@ class KFactorTrainer:
 
                 model.eval()
                 with torch.no_grad():
-                    vd2p, vd3p, vd4p = model(vk1, vy_n, vt_n, vh)
+                    vd2p, vd3p, vd4p = model(vk1, vy_n, vt_n, vh, vtheta)
                     lbfgs_val = (
                         mse_loss(vd2p, vd2)
                         + mse_loss(vd3p, vd3)
@@ -361,8 +365,8 @@ class KFactorTrainer:
                         step, lbfgs_steps, lbfgs_train, lbfgs_val, mem_info,
                     )
 
-            del fk1, fy_n, ft_n, fh, fd2, fd3, fd4
-            del vk1, vy_n, vt_n, vh, vd2, vd3, vd4
+            del fk1, fy_n, ft_n, fh, ftheta, fd2, fd3, fd4
+            del vk1, vy_n, vt_n, vh, vtheta, vd2, vd3, vd4
 
         total_time = time.time() - train_start
         logger.info("Training complete! Total time: %.1fs (%.1f min)",

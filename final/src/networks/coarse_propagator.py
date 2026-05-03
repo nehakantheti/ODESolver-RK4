@@ -1,37 +1,34 @@
-"""Meta-propagator neural network for the Parareal coarse solver.
+"""Derivative-predicting neural coarse propagator for Parareal.
 
-This module implements the coarse propagator network that predicts the
-next state y_{n+1} given the current state y_n, time information, and
-ODE parameters theta_ODE.
+This module implements a neural network that learns the ODE vector field
+f̂(y, t, θ) — the derivative dy/dt — rather than directly predicting
+the next state y_{n+1}.  Integration is then performed externally:
+
+    y_{n+1} = y_n + dt * f̂(y_n, t_n, θ)
+
+Why derivative prediction is superior:
+    1. **dt-independent**: Works for any step size without retraining.
+    2. **Physics-aligned**: ODEs define dy/dt, so we learn what the
+       ODE actually expresses.
+    3. **Composable**: Can use Euler, RK2, or RK4 integration with the
+       same learned f̂.
+    4. **No extrapolation**: Multi-step propagation over long slabs
+       naturally works because each step is small.
 
 Architecture:
-    A small MLP with parameter conditioning.  The network takes as input
-    the concatenation [y_n, t_n, delta_t, theta_ODE] and outputs both
-    the predicted next state y_hat_{n+1} and a scalar confidence score
-    epsilon_n in [0, 1].
-
-Key design feature — Meta-propagation:
-    By conditioning on theta_ODE (the ODE parameter vector), a single
-    trained network can generalise across a *family* of ODEs with
-    different parameter values.  This avoids retraining per problem
-    instance, unlike the PINN-Parareal approach (Ibrahim et al., 2023).
-
-Training loss (semi-physics-informed):
-    L = ||y_hat - y_fine||^2  +  lambda * ||y_hat' - f(t, y_hat)||^2
-         <--  data loss  -->     <--   physics residual   -->
-
-    The physics residual ensures the NN learns dynamically consistent
-    trajectories, improving generalisation to unseen parameters.
+    Input:  [y_n (D), t_n (1), theta_ODE (P)]  →  D + 1 + P
+    Trunk:  MLP with LayerNorm + SiLU + skip connections
+    Output: f̂(y, t, θ) of shape (D,)
 
 Reference:
-    - Ibrahim et al., "Parareal with a PINN as coarse propagator", 2023
-    - RandNet-Parareal, NeurIPS 2024 (inspiration for fast coarse NN)
+    - Neural ODEs (Chen et al., 2018) — same philosophy of learning f̂
+    - RandNet-Parareal, NeurIPS 2024
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -41,30 +38,25 @@ logger = logging.getLogger(__name__)
 
 
 class CoarsePropagatorNet(nn.Module):
-    """Meta-propagator network for the Parareal coarse solver.
+    """Derivative-predicting meta-propagator for the Parareal coarse solver.
 
-    Predicts the next ODE state over a coarse time step, conditioned on
-    ODE parameters for cross-problem generalisation.
-
-    The network has two output heads:
-        1. **State head**: predicts y_hat_{n+1} (dim D)
-        2. **Confidence head**: predicts epsilon_n in [0, 1] (scalar)
+    Predicts the ODE vector field f̂(y, t, θ) conditioned on ODE parameters
+    for cross-problem generalisation.  The caller performs integration
+    (Euler, RK2, etc.) using the predicted derivative.
 
     Attributes:
         state_dim: Dimensionality of the ODE state vector.
         param_dim: Number of ODE parameters (theta_ODE).
-        hidden_dim: Width of hidden layers (aligned to multiples of 8
-                    for GPU Tensor Core efficiency).
+        hidden_dim: Width of hidden layers.
 
     Example:
         >>> net = CoarsePropagatorNet(state_dim=2, param_dim=3)
-        >>> y_n = torch.randn(16, 2)      # batch of 16, state dim 2
+        >>> y_n = torch.randn(16, 2)
         >>> t_n = torch.randn(16, 1)
-        >>> delta_t = torch.randn(16, 1)
-        >>> theta = torch.randn(16, 3)    # 3 ODE params
-        >>> y_hat, confidence = net(y_n, t_n, delta_t, theta)
-        >>> y_hat.shape    # (16, 2)
-        >>> confidence.shape  # (16, 1)
+        >>> theta = torch.randn(16, 3)
+        >>> f_hat = net(y_n, t_n, theta)
+        >>> f_hat.shape    # (16, 2) — learned derivative
+        >>> # Integration: y_next = y_n + dt * f_hat
     """
 
     def __init__(
@@ -74,7 +66,7 @@ class CoarsePropagatorNet(nn.Module):
         hidden_dim: int = 128,
         n_hidden_layers: int = 3,
     ):
-        """Initialise the meta-propagator network.
+        """Initialise the derivative-predicting coarse propagator.
 
         Args:
             state_dim: Dimensionality of the ODE state (e.g., 2 for
@@ -89,10 +81,11 @@ class CoarsePropagatorNet(nn.Module):
         self.param_dim = param_dim
         self.hidden_dim = hidden_dim
 
-        # Input: [y_n (D), t_n (1), delta_t (1), theta_ODE (P)]
-        input_dim = state_dim + 2 + param_dim
+        # Input: [y_n (D), t_n (1), theta_ODE (P)]
+        # NO delta_t — the network is dt-independent
+        input_dim = state_dim + 1 + param_dim
 
-        # Build shared trunk: input → hidden layers
+        # Build shared trunk: input → hidden layers with skip connections
         layers = []
         prev_dim = input_dim
         for i in range(n_hidden_layers):
@@ -105,18 +98,16 @@ class CoarsePropagatorNet(nn.Module):
 
         self.trunk = nn.Sequential(*layers)
 
-        # Output head 1: state prediction
-        self.state_head = nn.Linear(hidden_dim, state_dim)
+        # Output: learned derivative f̂(y, t, θ)
+        self.derivative_head = nn.Linear(hidden_dim, state_dim)
 
-        # Output head 2: confidence score (scalar)
-        self.confidence_head = nn.Sequential(
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
-        )
+        # Initialise derivative head with small weights for stable start
+        nn.init.xavier_uniform_(self.derivative_head.weight, gain=0.1)
+        nn.init.zeros_(self.derivative_head.bias)
 
         logger.info(
-            "CoarsePropagatorNet created: state_dim=%d, param_dim=%d, "
-            "hidden_dim=%d, n_layers=%d, total_params=%d",
+            "CoarsePropagatorNet created (derivative mode): state_dim=%d, "
+            "param_dim=%d, hidden_dim=%d, n_layers=%d, total_params=%d",
             state_dim, param_dim, hidden_dim, n_hidden_layers,
             sum(p.numel() for p in self.parameters()),
         )
@@ -125,73 +116,107 @@ class CoarsePropagatorNet(nn.Module):
         self,
         y_n: Tensor,
         t_n: Tensor,
-        delta_t: Tensor,
         theta_ode: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
-        """Forward pass: predict next state and confidence.
-
-        Concatenates all inputs into a single feature vector, passes
-        through the shared trunk, then splits into the state prediction
-        and confidence score via separate output heads.
+    ) -> Tensor:
+        """Predict the ODE derivative f̂(y, t, θ).
 
         Args:
             y_n: Current state, shape ``(batch, state_dim)``.
             t_n: Current time, shape ``(batch, 1)``.
-            delta_t: Coarse time step, shape ``(batch, 1)``.
             theta_ode: ODE parameter vector, shape ``(batch, param_dim)``.
 
         Returns:
-            Tuple of:
-                - ``y_hat``: Predicted next state, shape ``(batch, state_dim)``.
-                - ``confidence``: Confidence score in [0, 1], shape ``(batch, 1)``.
+            Predicted derivative f̂, shape ``(batch, state_dim)``.
         """
-        # Concatenate all inputs: [y_n, t_n, delta_t, theta_ode]
-        x = torch.cat([y_n, t_n, delta_t, theta_ode], dim=-1)
+        # Concatenate: [y_n, t_n, theta_ode]
+        x = torch.cat([y_n, t_n, theta_ode], dim=-1)
 
-        # Shared feature extraction
+        # Feature extraction
         features = self.trunk(x)
 
-        # Dual-head output
-        y_hat = self.state_head(features)
-        confidence = self.confidence_head(features)
+        # Derivative prediction
+        f_hat = self.derivative_head(features)
 
-        return y_hat, confidence
+        return f_hat
 
     def predict(
         self,
         y_n: Tensor,
         t_n: float,
-        delta_t: float,
         theta_ode: Tensor,
-    ) -> Tuple[Tensor, Tensor]:
-        """Convenience method for single-sample inference.
+    ) -> Tensor:
+        """Convenience method for single-sample derivative prediction.
 
-        Handles the scalar-to-tensor conversion for t_n and delta_t,
-        and adds/removes the batch dimension automatically.
+        Handles the scalar-to-tensor conversion for t_n and adds/removes
+        the batch dimension automatically.
 
         Args:
             y_n: Current state, shape ``(state_dim,)`` (unbatched).
             t_n: Current time (scalar).
-            delta_t: Coarse time step (scalar).
             theta_ode: ODE parameter vector, shape ``(param_dim,)``.
 
         Returns:
-            Tuple of:
-                - ``y_hat``: Predicted next state, shape ``(state_dim,)``.
-                - ``confidence``: Confidence score (scalar tensor).
+            Predicted derivative f̂, shape ``(state_dim,)``.
         """
         device = y_n.device
 
         # Add batch dimension
         y_batch = y_n.unsqueeze(0)
         t_batch = torch.tensor([[t_n]], dtype=torch.float32, device=device)
-        dt_batch = torch.tensor([[delta_t]], dtype=torch.float32, device=device)
         theta_batch = theta_ode.unsqueeze(0)
 
         with torch.no_grad():
-            y_hat, confidence = self.forward(
-                y_batch, t_batch, dt_batch, theta_batch
-            )
+            f_hat = self.forward(y_batch, t_batch, theta_batch)
 
         # Remove batch dimension
-        return y_hat.squeeze(0), confidence.squeeze(0)
+        return f_hat.squeeze(0)
+
+    def integrate_euler(
+        self,
+        y_n: Tensor,
+        t_n: float,
+        dt: float,
+        theta_ode: Tensor,
+    ) -> Tensor:
+        """Forward Euler step using the learned derivative.
+
+        y_{n+1} = y_n + dt * f̂(y_n, t_n, θ)
+
+        Args:
+            y_n: Current state, shape ``(state_dim,)``.
+            t_n: Current time (scalar).
+            dt: Time step.
+            theta_ode: ODE parameter vector, shape ``(param_dim,)``.
+
+        Returns:
+            Next state, shape ``(state_dim,)``.
+        """
+        f_hat = self.predict(y_n, t_n, theta_ode)
+        return y_n + dt * f_hat
+
+    def integrate_rk2(
+        self,
+        y_n: Tensor,
+        t_n: float,
+        dt: float,
+        theta_ode: Tensor,
+    ) -> Tensor:
+        """Heun's method (RK2) using the learned derivative.
+
+        k1 = f̂(y_n, t_n)
+        k2 = f̂(y_n + dt*k1, t_n + dt)
+        y_{n+1} = y_n + dt/2 * (k1 + k2)
+
+        Args:
+            y_n: Current state, shape ``(state_dim,)``.
+            t_n: Current time (scalar).
+            dt: Time step.
+            theta_ode: ODE parameter vector, shape ``(param_dim,)``.
+
+        Returns:
+            Next state, shape ``(state_dim,)``.
+        """
+        k1 = self.predict(y_n, t_n, theta_ode)
+        y_mid = y_n + dt * k1
+        k2 = self.predict(y_mid, t_n + dt, theta_ode)
+        return y_n + (dt / 2.0) * (k1 + k2)
