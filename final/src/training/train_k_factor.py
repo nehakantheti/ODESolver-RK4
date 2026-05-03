@@ -105,6 +105,7 @@ class KFactorTrainer:
         val_fraction: float = 0.2,
         use_compile: bool = True,
         lbfgs_steps: int = 50,
+        early_stopping_patience: int = 20,
     ) -> Tuple[KFactorResidualNet, Dict[str, List[float]]]:
         """Train the k-factor residual network end-to-end.
 
@@ -223,9 +224,19 @@ class KFactorTrainer:
         if self.use_amp:
             logger.info("AMP enabled: float16 forward pass + float32 master weights")
 
-        # -- Step 4: Training loop with AMP ---------------------------------
-        logger.info("Step 4/4: Training for %d epochs...", epochs)
+        # -- Step 4: Training loop with AMP + early stopping -----------------
+        logger.info(
+            "Step 4/4: Training for up to %d epochs "
+            "(early_stopping_patience=%d)...",
+            epochs, early_stopping_patience,
+        )
         history: Dict[str, List[float]] = {"train_loss": [], "val_loss": []}
+
+        # Early stopping state
+        best_val_loss = float("inf")
+        best_model_state = None
+        epochs_without_improvement = 0
+        actual_epochs = 0
 
         for epoch in range(epochs):
             # ---- Training ----
@@ -276,6 +287,18 @@ class KFactorTrainer:
             avg_val_loss = val_loss / max(n_val_batches, 1)
             history["val_loss"].append(avg_val_loss)
 
+            # ---- Early stopping check ----
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_model_state = {
+                    k: v.clone() for k, v in model.state_dict().items()
+                }
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            actual_epochs = epoch + 1
+
             if epoch % 50 == 0 or epoch == epochs - 1:
                 # GPU memory logging
                 mem_info = ""
@@ -285,10 +308,29 @@ class KFactorTrainer:
                     mem_info = f", GPU_mem={mem_used:.0f}/{mem_reserved:.0f}MB"
 
                 logger.info(
-                    "Epoch %d/%d: train=%.6f, val=%.6f, lr=%.2e%s",
+                    "Epoch %d/%d: train=%.6f, val=%.6f, lr=%.2e, "
+                    "best_val=%.6f, no_improv=%d%s",
                     epoch, epochs, avg_train_loss, avg_val_loss,
-                    scheduler.get_last_lr()[0], mem_info,
+                    scheduler.get_last_lr()[0],
+                    best_val_loss, epochs_without_improvement, mem_info,
                 )
+
+            # Check early stopping
+            if epochs_without_improvement >= early_stopping_patience:
+                logger.info(
+                    "Early stopping at epoch %d (no improvement for %d epochs, "
+                    "best_val=%.6f)",
+                    epoch, early_stopping_patience, best_val_loss,
+                )
+                break
+
+        # Restore best model weights
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+            logger.info(
+                "Restored best model (val_loss=%.6f)",
+                best_val_loss,
+            )
 
         # -- Stage 2: L-BFGS fine-tuning (hybrid optimizer) ------------------
         if lbfgs_steps > 0:
