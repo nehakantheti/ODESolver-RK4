@@ -363,6 +363,11 @@ class PararealSolver:
         fine_solves_list = []
         gate_stats_list = []
 
+        # F_prev caches the fine-solve results from the previous iteration.
+        # Needed for locked slabs: their F_values must persist, not be
+        # replaced with G_old (which would zero out the correction).
+        F_prev = G_old.clone()
+
         self.trust_gate.reset()
 
         for k in range(self.max_iterations):
@@ -393,11 +398,13 @@ class PararealSolver:
                     # ---- True parallel: multiprocessing.Pool ----
                     tasks = []
                     for idx in active_idx:
-                        y0_slab = U_old[idx.item()].cpu().tolist()
+                        n_idx = idx.item()
+                        y0_slab = U_old[n_idx].cpu().tolist()
+                        t_slab_start = slab_times[n_idx].item()
                         tasks.append((
                             y0_slab,
-                            0.0,  # relative start (all slabs same width)
-                            delta_t,
+                            t_slab_start,
+                            t_slab_start + delta_t,
                             fine_dt,
                             params,
                         ))
@@ -408,21 +415,29 @@ class PararealSolver:
                             dtype=torch.float32,
                         )
                 else:
-                    # ---- Sequential CPU vmap ----
-                    active_y0 = U_old[active_idx].cpu()
-                    endpoints = self.fine_solver.solve_batched_endpoints(
-                        f=f,
-                        y0_batch=active_y0,
-                        t_span=(0.0, delta_t),
-                        dt=fine_dt,
-                        params=params,
-                    )
-                    F_values[active_idx] = endpoints.to(self.device)
+                    # ---- Sequential CPU: one-by-one fine solve ----
+                    for idx in active_idx:
+                        n_idx = idx.item()
+                        y0_slab = U_old[n_idx].cpu()
+                        t_slab_start = slab_times[n_idx].item()
+                        endpoint = self.fine_solver.solve_interval(
+                            f=f,
+                            y0=y0_slab,
+                            t_start=t_slab_start,
+                            t_end=t_slab_start + delta_t,
+                            dt=fine_dt,
+                            params=params,
+                        )
+                        F_values[idx] = endpoint.to(self.device)
 
-            # Fill skipped slabs with cached coarse predictions
+            # For skipped (locked) slabs, reuse PREVIOUS iteration's
+            # fine result.  This preserves the correction formula:
+            #   U_{n+1} = G_new + (F_old - G_old)
+            # If we used G_old here, correction = G_new + 0 = G_new (wrong).
             skipped_idx = (~fine_mask).nonzero(as_tuple=True)[0]
             if len(skipped_idx) > 0:
-                F_values[skipped_idx] = G_old[skipped_idx]
+                # F_prev was stored from last iteration
+                F_values[skipped_idx] = F_prev[skipped_idx]
 
             # Parareal correction (sequential due to dependency chain)
             for n in range(n_slabs):
@@ -435,6 +450,9 @@ class PararealSolver:
 
                 # Update cached G_old for next iteration
                 G_old[n] = G_new
+
+            # Save F_values for next iteration (locked slabs reuse these)
+            F_prev = F_values.clone()
 
             # Convergence check
             max_change = torch.max(torch.abs(U - U_old)).item()
