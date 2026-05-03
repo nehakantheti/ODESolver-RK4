@@ -205,12 +205,14 @@ class PararealSolver:
 
         # Set up classical coarse propagator if needed
         self.coarse_classical = None
-        if coarse_mode in ("euler", "backward_euler") and system is not None:
+        if coarse_mode in ("euler", "backward_euler", "rk2") and system is not None:
             from src.solvers.classical_coarse import (
-                EulerCoarse, BackwardEulerCoarse,
+                EulerCoarse, BackwardEulerCoarse, RK2Coarse,
             )
             if coarse_mode == "euler":
                 self.coarse_classical = EulerCoarse(system, step_dt=coarse_dt)
+            elif coarse_mode == "rk2":
+                self.coarse_classical = RK2Coarse(system, step_dt=coarse_dt)
             else:
                 self.coarse_classical = BackwardEulerCoarse(
                     system, step_dt=coarse_dt,
@@ -271,15 +273,23 @@ class PararealSolver:
             Predicted state at t_n + delta_t, shape ``(dim,)``.
         """
         if self.coarse_mode == "neural" and self.coarse_net is not None:
-            # Multi-step Euler with learned derivative f̂
+            # Multi-step RK2 (Heun's method) with learned derivative f̂
+            # RK2 is O(h²) vs Euler's O(h) — critical for reducing K.
+            # Cost: 2 NN calls per step (vs 1 for Euler), still much
+            # cheaper than fine RK4 (which does thousands of f evals).
             n_steps = max(1, round(delta_t / self.coarse_dt))
             step_dt = delta_t / n_steps
             y = y_n
 
             for i in range(n_steps):
                 t_curr = t_n + i * step_dt
-                f_hat = self.coarse_net.predict(y, t_curr, theta_ode)
-                y = y + step_dt * f_hat
+                # Stage 1: derivative at start
+                k1 = self.coarse_net.predict(y, t_curr, theta_ode)
+                # Stage 2: derivative at end (using Euler predictor)
+                y_euler = y + step_dt * k1
+                k2 = self.coarse_net.predict(y_euler, t_curr + step_dt, theta_ode)
+                # Heun's update: average of start and end derivatives
+                y = y + (step_dt / 2.0) * (k1 + k2)
 
             return y
 

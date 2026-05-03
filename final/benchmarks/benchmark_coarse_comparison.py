@@ -183,7 +183,7 @@ def main():
     # 2. Parareal with different coarse propagators
     all_results = []
 
-    coarse_modes = ["euler", "backward_euler"]
+    coarse_modes = ["euler", "rk2", "backward_euler"]
     if coarse_net is not None:
         coarse_modes.append("neural")
 

@@ -198,3 +198,66 @@ class BackwardEulerCoarse:
             y = y_guess
 
         return y
+
+
+class RK2Coarse:
+    """RK2 (Heun's method) coarse propagator for Parareal.
+
+    Uses multi-step Heun integration — a second-order explicit method:
+
+        k1 = f(t, y)
+        k2 = f(t + dt, y + dt * k1)
+        y = y + dt/2 * (k1 + k2)
+
+    This is O(h²) per step vs Euler's O(h), giving dramatically better
+    accuracy at only 2× the cost per step.  This is the classical
+    counterpart to the neural RK2 integration.
+
+    Attributes:
+        system: The ODE system.
+        step_dt: Step size for RK2 integration within a slab.
+    """
+
+    def __init__(self, system: ODESystem, step_dt: float = 0.1):
+        """Initialise the RK2 coarse propagator.
+
+        Args:
+            system: ODE system instance.
+            step_dt: Step size for multi-step RK2 within each slab.
+        """
+        self.system = system
+        self.step_dt = step_dt
+        logger.info(
+            "RK2Coarse created: system='%s', step_dt=%.3f",
+            system.name, step_dt,
+        )
+
+    def propagate(
+        self,
+        y_n: Tensor,
+        t_n: float,
+        delta_t: float,
+        params: Dict[str, float],
+    ) -> Tensor:
+        """Multi-step RK2 (Heun) propagation across a slab.
+
+        Args:
+            y_n: Current state, shape ``(dim,)``.
+            t_n: Current time.
+            delta_t: Total time interval.
+            params: ODE parameter dictionary.
+
+        Returns:
+            Predicted state at t_n + delta_t.
+        """
+        n_steps = max(1, round(delta_t / self.step_dt))
+        dt = delta_t / n_steps
+        y = y_n.clone()
+
+        for i in range(n_steps):
+            t = t_n + i * dt
+            k1 = self.system.f(t, y, params)
+            k2 = self.system.f(t + dt, y + dt * k1, params)
+            y = y + (dt / 2.0) * (k1 + k2)
+
+        return y
