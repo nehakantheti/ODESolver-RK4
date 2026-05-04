@@ -1,24 +1,27 @@
 """Benchmark suite for comparing solver performance.
 
 Runs systematic benchmarks comparing:
-    1. Classical RK4 at various step sizes (GPU-accelerated)
+    1. Classical RK4 at various step sizes
     2. Parareal with neural coarse propagator
     3. Serial vs parallel execution modes
 
-GPU usage:
-    - All solvers run on CUDA if available
-    - CUDA events used for accurate GPU timing
-    - torch.cuda.synchronize() ensures timing accuracy
+Three benchmark modes:
+    - **cpu**: Everything on CPU, sequential fine pass (baseline).
+    - **gpu**: Coarse net on CUDA, fine pass on CPU sequential.
+    - **multiproc**: Coarse net on CPU, fine pass with multiprocessing workers.
 
-Results are printed to console and saved to CSV files.
+Each mode saves results to ``benchmarks/results/<mode>/`` for comparison.
 
 Usage:
     cd final
-    py -3.11 benchmarks/benchmark_solvers.py
+    python benchmarks/benchmark_solvers.py --mode cpu
+    python benchmarks/benchmark_solvers.py --mode gpu
+    python benchmarks/benchmark_solvers.py --mode multiproc
 """
 
 from __future__ import annotations
 
+import argparse
 import logging
 import sys
 import os
@@ -47,6 +50,54 @@ logger = logging.getLogger(__name__)
 
 # Auto-detect device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Auto-detect optimal worker count for multiprocessing fine pass
+# Quarter of logical cores avoids SMT contention (e.g. 64 threads → 16 workers)
+N_WORKERS = min(os.cpu_count() // 4, 16) if os.cpu_count() else 0
+
+
+def _load_coarse_model(system, device, hidden_dim=128):
+    """Load a pre-trained coarse propagator from trained_models/.
+
+    Looks for ``trained_models/coarse_{system_name}.pt``.  Falls back
+    to lightweight training if the model file is not found.
+
+    Args:
+        system: ODE system instance.
+        device: Torch device.
+        hidden_dim: Hidden layer width (must match the saved model).
+
+    Returns:
+        Loaded CoarsePropagatorNet in eval mode.
+    """
+    sys_key = system.name.lower().replace(" ", "_")
+    model_path = Path("trained_models") / f"coarse_{sys_key}.pt"
+
+    net = CoarsePropagatorNet(
+        state_dim=system.dim,
+        param_dim=len(system.param_names),
+        hidden_dim=hidden_dim,
+    ).to(device)
+
+    if model_path.exists():
+        state_dict = torch.load(
+            model_path, map_location=device, weights_only=True,
+        )
+        net.load_state_dict(state_dict)
+        net.eval()
+        logger.info("Loaded pre-trained coarse model from %s", model_path)
+    else:
+        logger.warning(
+            "Pre-trained model not found at %s — falling back to "
+            "lightweight training (run train_all.py first for best results)",
+            model_path,
+        )
+        trainer = CoarseTrainer(system, device=device)
+        net, _ = trainer.train(
+            n_trajectories=100, epochs=1000, hidden_dim=hidden_dim,
+        )
+
+    return net
 
 
 def _timed_call(fn, device, n_runs=3):
@@ -164,12 +215,8 @@ def benchmark_parareal_slabs():
 
     system = get_system("damped_oscillator")
 
-    # Quick-train a coarse propagator on GPU
-    logger.info("Training coarse propagator for benchmark...")
-    trainer = CoarseTrainer(system, device=DEVICE)
-    model, _ = trainer.train(
-        n_trajectories=50, epochs=500, hidden_dim=32,
-    )
+    # Load pre-trained coarse propagator (trained via train_all.py)
+    model = _load_coarse_model(system, device=DEVICE)
 
     y0_cpu = system.default_initial_condition()
     y0_gpu = y0_cpu.to(DEVICE)
@@ -197,7 +244,7 @@ def benchmark_parareal_slabs():
             trust_gate=TrustGate(initial_threshold=0.1),
             max_iterations=30,
             system_name="damped_oscillator",
-            n_workers=0,  # CPU vmap (faster than multiprocessing for typical workloads)
+            n_workers=N_WORKERS,
         )
 
         def _parareal_run():
@@ -252,12 +299,8 @@ def benchmark_parareal_hard():
 
     system = get_system("damped_oscillator")
 
-    # Better-trained coarse propagator for fewer Parareal iterations
-    logger.info("Training stronger coarse propagator (hidden=64, epochs=1000)...")
-    trainer = CoarseTrainer(system, device=DEVICE)
-    model, _ = trainer.train(
-        n_trajectories=100, epochs=1000, hidden_dim=64,
-    )
+    # Load pre-trained coarse propagator (trained via train_all.py)
+    model = _load_coarse_model(system, device=DEVICE)
 
     y0_cpu = system.default_initial_condition()
     y0_gpu = y0_cpu.to(DEVICE)
@@ -291,7 +334,7 @@ def benchmark_parareal_hard():
             trust_gate=TrustGate(initial_threshold=0.1),
             max_iterations=50,
             system_name="damped_oscillator",
-            n_workers=0,  # CPU vmap (faster than multiprocessing for typical workloads)
+            n_workers=N_WORKERS,
         )
 
         def _parareal_run():
@@ -328,18 +371,73 @@ def benchmark_parareal_hard():
 
 
 def main():
-    """Run all benchmarks and save results."""
-    logger.info("Starting benchmark suite...")
-    logger.info("Device: %s", DEVICE)
-    if DEVICE.type == "cuda":
-        logger.info("GPU: %s", torch.cuda.get_device_name(DEVICE))
-    logger.info("PyTorch: %s", torch.__version__)
+    """Run all benchmarks and save results.
 
-    output_dir = Path("benchmarks/results/server-runs")
+    Supports three execution modes via ``--mode``:
+        - ``cpu``: CPU-only, sequential fine pass (baseline).
+        - ``gpu``: CUDA-accelerated coarse net, sequential fine pass.
+        - ``multiproc``: CPU coarse net, multiprocessing fine pass.
+
+    Results are saved to ``benchmarks/results/<mode>/``.
+    """
+    global DEVICE, N_WORKERS
+
+    parser = argparse.ArgumentParser(
+        description="Benchmark solvers in different execution modes.",
+    )
+    parser.add_argument(
+        "--mode", type=str, default="gpu",
+        choices=["cpu", "gpu", "multiproc"],
+        help=(
+            "Execution mode: "
+            "'cpu' = CPU-only sequential, "
+            "'gpu' = CUDA coarse + CPU fine, "
+            "'multiproc' = CPU coarse + multiprocessing fine. "
+            "(default: gpu)"
+        ),
+    )
+    parser.add_argument(
+        "--n-workers", type=int, default=None,
+        help="Number of multiprocessing workers (multiproc mode only). "
+             "Defaults to cpu_count//4.",
+    )
+    args = parser.parse_args()
+
+    # -- Configure device and workers per mode -------------------------------
+    if args.mode == "cpu":
+        DEVICE = torch.device("cpu")
+        N_WORKERS = 0
+        mode_label = "CPU Sequential"
+    elif args.mode == "gpu":
+        if not torch.cuda.is_available():
+            logger.error("CUDA not available — falling back to CPU mode")
+            DEVICE = torch.device("cpu")
+        else:
+            DEVICE = torch.device("cuda")
+        N_WORKERS = 0
+        mode_label = (
+            f"GPU ({torch.cuda.get_device_name(DEVICE)})"
+            if DEVICE.type == "cuda" else "CPU (no CUDA)"
+        )
+    elif args.mode == "multiproc":
+        DEVICE = torch.device("cpu")
+        N_WORKERS = args.n_workers or (
+            min(os.cpu_count() // 4, 16) if os.cpu_count() else 8
+        )
+        mode_label = f"CPU Multiprocessing ({N_WORKERS} workers)"
+
+    logger.info("=" * 60)
+    logger.info("BENCHMARK SUITE — Mode: %s", mode_label)
+    logger.info("Device: %s | Workers: %d | PyTorch: %s",
+                DEVICE, N_WORKERS, torch.__version__)
+    logger.info("=" * 60)
+
+    output_dir = Path(f"benchmarks/results/{args.mode}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Benchmark 1: Step sizes
     df_steps = benchmark_step_sizes()
+    df_steps["mode"] = args.mode
     df_steps.to_csv(output_dir / "step_size_benchmark.csv", index=False)
     logger.info("Step size results saved to %s",
                 output_dir / "step_size_benchmark.csv")
@@ -348,6 +446,7 @@ def main():
     # Benchmark 2: Parareal slabs (easy — dt=0.01, 2K steps)
     print("\n")
     df_easy = benchmark_parareal_slabs()
+    df_easy["mode"] = args.mode
     df_easy.to_csv(output_dir / "parareal_easy_benchmark.csv", index=False)
     logger.info("Parareal EASY results saved to %s",
                 output_dir / "parareal_easy_benchmark.csv")
@@ -356,14 +455,14 @@ def main():
     # Benchmark 3: Parareal slabs (hard — dt=0.001, 20K steps)
     print("\n")
     df_hard = benchmark_parareal_hard()
+    df_hard["mode"] = args.mode
     df_hard.to_csv(output_dir / "parareal_hard_benchmark.csv", index=False)
     logger.info("Parareal HARD results saved to %s",
                 output_dir / "parareal_hard_benchmark.csv")
     print("\n" + df_hard.to_string(index=False))
 
-    logger.info("All benchmarks complete!")
+    logger.info("All benchmarks complete! Results in %s/", output_dir)
 
 
 if __name__ == "__main__":
     main()
-
