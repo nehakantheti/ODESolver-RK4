@@ -228,3 +228,6 @@ GEMINI.md
 # RESEARCH_REFERENCES.md
 *.pt
 *.csv
+
+# server virtual env
+oderkenv/*
