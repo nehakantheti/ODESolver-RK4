@@ -894,3 +894,80 @@ final/
 └── benchmarks/
     └── benchmark_coarse_comparison.py  ✅ NEW — comparison benchmark
 ```
+
+---
+
+## Phase 10 — GPU Server Deployment (3× A4000)
+
+### 10.1 Server Hardware
+
+| Component | Spec |
+|-----------|------|
+| **CPU** | AMD Ryzen Threadripper 7970X, 32 cores / 64 threads, up to 5.35 GHz |
+| **GPU** | 3× NVIDIA RTX A4000, 16GB VRAM each (Ampere, sm_86) |
+| **CUDA** | Driver: 12.8, PyTorch: cu121 (compatible — bundles own runtime) |
+| **OS** | Linux |
+
+### 10.2 Multi-GPU Strategy
+
+**Decision: Separate processes per GPU (not DataParallel)**
+
+| Approach | Verdict | Reason |
+|----------|---------|--------|
+| Separate processes (1 system/GPU) | ✅ Best | 4 independent systems, ~35K param models, zero comms |
+| `nn.DataParallel` | ❌ | Gradient sync costs more than compute for 35K params |
+| `DistributedDataParallel` | ❌ | Same problem — model too small |
+
+### 10.3 Benchmark Findings
+
+The fine pass is always CPU. GPU only accelerates coarse NN inference. Without parallel fine pass (`n_workers > 0`), Parareal is slower than serial: total work = K × serial work.
+
+Speedup formula: `speedup = P / K` (requires parallel fine pass).
+
+Previous results (local, sequential fine pass):
+
+| Benchmark | Slabs | K | Speedup | Root Cause |
+|-----------|-------|---|---------|------------|
+| Easy (dt=0.01) | 2-16 | 3-16 | 0.05-0.16x | Serial too cheap (~227ms) |
+| Hard (dt=0.001) | 16 | 17 | 0.17x | K = P (weak model, 1000 epochs) |
+
+### 10.4 Training Commands
+
+```bash
+# 3 systems in parallel across GPUs
+CUDA_VISIBLE_DEVICES=0 nohup python -m src.training.train_all --system damped_oscillator --coarse-epochs 5000 --kfactor-epochs 3000 --n-trajectories 300 --lbfgs-steps 100 > logs/train_damped_oscillator.log 2>&1 &
+CUDA_VISIBLE_DEVICES=1 nohup python -m src.training.train_all --system lotka_volterra --coarse-epochs 5000 --kfactor-epochs 3000 --n-trajectories 300 --lbfgs-steps 100 > logs/train_lotka_volterra.log 2>&1 &
+CUDA_VISIBLE_DEVICES=2 nohup python -m src.training.train_all --system van_der_pol --coarse-epochs 5000 --kfactor-epochs 3000 --n-trajectories 300 --lbfgs-steps 100 > logs/train_van_der_pol.log 2>&1 &
+wait
+CUDA_VISIBLE_DEVICES=0 python -m src.training.train_all --system lorenz --coarse-epochs 5000 --kfactor-epochs 3000 --n-trajectories 300 --lbfgs-steps 100 > logs/train_lorenz.log 2>&1
+```
+
+### 10.5 Benchmark Commands
+
+```bash
+python benchmarks/benchmark_solvers.py
+# Coarse comparisons across GPUs
+CUDA_VISIBLE_DEVICES=0 python benchmarks/benchmark_coarse_comparison.py --system damped_oscillator --n-slabs 4 8 16 --fine-dt 0.001
+CUDA_VISIBLE_DEVICES=1 python benchmarks/benchmark_coarse_comparison.py --system lotka_volterra --n-slabs 4 8 16 --fine-dt 0.001
+CUDA_VISIBLE_DEVICES=2 python benchmarks/benchmark_coarse_comparison.py --system van_der_pol --n-slabs 4 8 16 --fine-dt 0.001
+CUDA_VISIBLE_DEVICES=0 python benchmarks/benchmark_coarse_comparison.py --system lorenz --n-slabs 4 8 16 --fine-dt 0.001
+```
+
+### 10.6 Training Configuration
+
+| Parameter | Old (benchmark) | New (server) | Why |
+|-----------|----------------|-------------|-----|
+| coarse_epochs | 500-1000 | **5000** | Convergence + L-BFGS polish for K <= 3 |
+| hidden_dim | 32-64 | **128** | A4000: 16GB VRAM, model uses ~50MB |
+| n_trajectories | 50-100 | **300** | More diverse training data |
+| lbfgs_steps | 0 | **100** | Second-order polishing |
+| kfactor_epochs | N/A | **3000** | Complements coarse propagator |
+
+### 10.7 Key Learnings
+
+1. **No speedup without parallel fine pass**: Sequential = K x serial work. Need `n_workers > 0`.
+2. **Coarse quality is #1 lever**: K must be much less than P. K=3, P=16 gives theoretical 5.3x speedup.
+3. **Model too small for multi-GPU parallelism**: 35K params — sync overhead > compute.
+4. **Embarrassingly parallel training**: 4 systems x 3 GPUs, zero communication.
+5. **`torch.compile` works on Linux**: Triton backend active on A4000 (Ampere).
+6. **Coarse_dt tuning**: Smaller inference coarse_dt = more NN calls = better guess = fewer K.
