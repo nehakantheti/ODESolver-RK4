@@ -61,7 +61,7 @@ def run_sequential_rk4(system, params, y0, t_span, fine_dt):
 def run_parareal(
     system, params, y0, t_span, fine_dt, n_slabs, coarse_mode,
     coarse_net=None, theta_ode=None, coarse_dt=0.1,
-    tolerance=1e-6, max_iter=50,
+    tolerance=1e-6, max_iter=50, **kwargs
 ):
     """Run Parareal with a specified coarse propagator."""
     solver = PararealSolver(
@@ -72,6 +72,7 @@ def run_parareal(
         coarse_dt=coarse_dt,
         coarse_mode=coarse_mode,
         system=system,
+        n_workers=kwargs.get("n_workers", 0),
     )
 
     result = solver.solve(
@@ -146,6 +147,7 @@ def main():
     parser.add_argument("--tolerance", type=float, default=1e-6)
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--max-iter", type=int, default=50)
+    parser.add_argument("--n-workers", type=int, default=0, help="Number of workers for multiprocessing fine pass")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -210,6 +212,7 @@ def main():
                     coarse_dt=args.coarse_dt,
                     tolerance=args.tolerance,
                     max_iter=args.max_iter,
+                    n_workers=args.n_workers,
                 )
 
                 error = compute_error(
