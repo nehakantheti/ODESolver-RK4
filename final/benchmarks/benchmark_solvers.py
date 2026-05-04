@@ -335,7 +335,7 @@ def main():
         logger.info("GPU: %s", torch.cuda.get_device_name(DEVICE))
     logger.info("PyTorch: %s", torch.__version__)
 
-    output_dir = Path("benchmarks/results")
+    output_dir = Path("benchmarks/results/server-runs")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Benchmark 1: Step sizes
