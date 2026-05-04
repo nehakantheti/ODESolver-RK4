@@ -1,0 +1,15 @@
+# Neural-Accelerated Parallel RK4 ODE Solver
+# Python 3.11 compatible
+#
+# GPU install (CUDA 12.8 — RTX 40xx/30xx):
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+torch>=2.1.0
+numpy>=1.24
+matplotlib>=3.7
+plotly>=5.15
+streamlit>=1.28
+pandas>=2.0
+tqdm>=4.65
+scipy>=1.11
+pytest
