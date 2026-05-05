@@ -1,25 +1,25 @@
 System,dt,steps,time_ms,error,mode
-Damped Harmonic Oscillator,0.05,400,23.82,2.384185791015625e-07,multiproc
-Damped Harmonic Oscillator,0.01,2000,118.7,2.9802322387695312e-08,multiproc
-Damped Harmonic Oscillator,0.005,4000,238.68,2.682209014892578e-07,multiproc
-Damped Harmonic Oscillator,0.001,20000,1198.61,1.3113021850585938e-06,multiproc
-Damped Harmonic Oscillator,0.0005,40000,2378.08,7.152557373046875e-07,multiproc
-Damped Harmonic Oscillator,0.0001,200000,11857.91,3.2782554626464844e-07,multiproc
-Lotka-Volterra,0.05,300,24.95,0.000628352165222168,multiproc
-Lotka-Volterra,0.01,1500,125.17,3.7550926208496094e-06,multiproc
-Lotka-Volterra,0.005,3000,252.96,5.662441253662109e-06,multiproc
-Lotka-Volterra,0.001,15000,1265.1,8.046627044677734e-06,multiproc
-Lotka-Volterra,0.0005,30000,2518.0,2.2590160369873047e-05,multiproc
-Lotka-Volterra,0.0001,150000,12568.67,9.298324584960938e-06,multiproc
-Van der Pol Oscillator,0.05,400,27.61,4.7691166400909424e-05,multiproc
-Van der Pol Oscillator,0.01,2000,142.12,2.136826515197754e-05,multiproc
-Van der Pol Oscillator,0.005,4000,280.48,2.401694655418396e-05,multiproc
-Van der Pol Oscillator,0.001,20000,1402.4,2.7194619178771973e-05,multiproc
-Van der Pol Oscillator,0.0005,40000,2813.66,1.9073486328125e-06,multiproc
-Van der Pol Oscillator,0.0001,200000,13975.06,6.4373016357421875e-06,multiproc
-Lorenz Attractor,0.05,500,43.2,8.329646110534668,multiproc
-Lorenz Attractor,0.01,2500,220.16,2.3127896785736084,multiproc
-Lorenz Attractor,0.005,5000,437.18,13.544636726379395,multiproc
-Lorenz Attractor,0.001,25000,2197.28,4.628820419311523,multiproc
-Lorenz Attractor,0.0005,50000,4388.66,2.7975962162017822,multiproc
-Lorenz Attractor,0.0001,250000,21784.97,5.054222106933594,multiproc
+Damped Harmonic Oscillator,0.05,400,24.6,2.384185791015625e-07,multiproc
+Damped Harmonic Oscillator,0.01,2000,126.79,2.9802322387695312e-08,multiproc
+Damped Harmonic Oscillator,0.005,4000,246.46,2.682209014892578e-07,multiproc
+Damped Harmonic Oscillator,0.001,20000,1216.28,1.3113021850585938e-06,multiproc
+Damped Harmonic Oscillator,0.0005,40000,2436.4,7.152557373046875e-07,multiproc
+Damped Harmonic Oscillator,0.0001,200000,12158.49,3.2782554626464844e-07,multiproc
+Lotka-Volterra,0.05,300,25.41,0.000628352165222168,multiproc
+Lotka-Volterra,0.01,1500,127.0,3.7550926208496094e-06,multiproc
+Lotka-Volterra,0.005,3000,258.18,5.662441253662109e-06,multiproc
+Lotka-Volterra,0.001,15000,1290.47,8.046627044677734e-06,multiproc
+Lotka-Volterra,0.0005,30000,2587.29,2.2590160369873047e-05,multiproc
+Lotka-Volterra,0.0001,150000,12822.56,9.298324584960938e-06,multiproc
+Van der Pol Oscillator,0.05,400,32.42,4.7691166400909424e-05,multiproc
+Van der Pol Oscillator,0.01,2000,141.88,2.136826515197754e-05,multiproc
+Van der Pol Oscillator,0.005,4000,286.82,2.401694655418396e-05,multiproc
+Van der Pol Oscillator,0.001,20000,1442.96,2.7194619178771973e-05,multiproc
+Van der Pol Oscillator,0.0005,40000,2885.6,1.9073486328125e-06,multiproc
+Van der Pol Oscillator,0.0001,200000,14383.01,6.4373016357421875e-06,multiproc
+Lorenz Attractor,0.05,500,44.88,8.329646110534668,multiproc
+Lorenz Attractor,0.01,2500,227.49,2.3127896785736084,multiproc
+Lorenz Attractor,0.005,5000,453.37,13.544636726379395,multiproc
+Lorenz Attractor,0.001,25000,2234.26,4.628820419311523,multiproc
+Lorenz Attractor,0.0005,50000,4503.07,2.7975962162017822,multiproc
+Lorenz Attractor,0.0001,250000,22393.32,5.054222106933594,multiproc
