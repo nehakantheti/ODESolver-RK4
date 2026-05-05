@@ -213,69 +213,74 @@ def benchmark_parareal_slabs():
     logger.info("BENCHMARK: Parareal Slab Count (device=%s)", DEVICE)
     logger.info("=" * 60)
 
-    system = get_system("damped_oscillator")
-
-    # Load pre-trained coarse propagator (trained via train_all.py)
-    model = _load_coarse_model(system, device=DEVICE)
-
-    y0_cpu = system.default_initial_condition()
-    y0_gpu = y0_cpu.to(DEVICE)
-    params = system.default_params()
-    theta = system.param_vector(params, device=DEVICE)
-
     slab_counts = [2, 4, 8, 12, 16]
     results = []
 
-    # Serial reference: CPU is faster for sequential RK4 (no kernel overhead)
-    cpu_solver = ClassicalRK4Solver(device=torch.device("cpu"))
+    for system_name in SYSTEM_REGISTRY:
+        logger.info("-" * 40)
+        logger.info("System: %s", system_name)
+        
+        system = get_system(system_name)
 
-    def _serial_run():
-        return cpu_solver.solve_single(
-            f=system.f, y0=y0_cpu, t_span=system.default_time_span(),
-            dt=0.01, params=params,
-        )
+        # Load pre-trained coarse propagator
+        model = _load_coarse_model(system, device=DEVICE)
 
-    serial_result, serial_time = _timed_call(_serial_run, torch.device("cpu"))
-    logger.info("Serial RK4 baseline: %.2fms (CPU)", serial_time)
+        y0_cpu = system.default_initial_condition()
+        y0_gpu = y0_cpu.to(DEVICE)
+        params = system.default_params()
+        theta = system.param_vector(params, device=DEVICE)
 
-    for n_slabs in slab_counts:
-        parareal = PararealSolver(
-            coarse_net=model, device=DEVICE,
-            trust_gate=TrustGate(initial_threshold=0.1),
-            max_iterations=30,
-            system_name="damped_oscillator",
-            n_workers=N_WORKERS,
-        )
+        # Serial reference: CPU is faster for sequential RK4
+        cpu_solver = ClassicalRK4Solver(device=torch.device("cpu"))
 
-        def _parareal_run():
-            return parareal.solve(
-                f=system.f, y0=y0_gpu, t_span=system.default_time_span(),
-                n_slabs=n_slabs, fine_dt=0.01,
-                params=params, theta_ode=theta,
-                tolerance=1e-5, use_trust_gate=True,
+        def _serial_run():
+            return cpu_solver.solve_single(
+                f=system.f, y0=y0_cpu, t_span=system.default_time_span(),
+                dt=0.01, params=params,
             )
 
-        result, elapsed = _timed_call(_parareal_run, DEVICE, n_runs=1)
+        serial_result, serial_time = _timed_call(_serial_run, torch.device("cpu"))
+        logger.info("Serial RK4 baseline: %.2fms (CPU)", serial_time)
 
-        # Error vs serial: move GPU result to CPU for comparison
-        endpoint_err = torch.max(
-            torch.abs(result.y[-1].cpu() - serial_result.y[-1].cpu())
-        ).item()
+        for n_slabs in slab_counts:
+            parareal = PararealSolver(
+                coarse_net=model, device=DEVICE,
+                trust_gate=TrustGate(lock_threshold=1e-5, lock_patience=1),
+                max_iterations=30,
+                system_name=system_name,
+                n_workers=N_WORKERS,
+                coarse_dt=0.01,
+            )
 
-        results.append({
-            "n_slabs": n_slabs,
-            "iterations": result.n_iterations,
-            "time_ms": round(elapsed, 2),
-            "serial_time_ms": round(serial_time, 2),
-            "speedup": round(serial_time / elapsed, 2) if elapsed > 0 else 0,
-            "endpoint_error": endpoint_err,
-        })
+            def _parareal_run():
+                return parareal.solve(
+                    f=system.f, y0=y0_gpu, t_span=system.default_time_span(),
+                    n_slabs=n_slabs, fine_dt=0.01,
+                    params=params, theta_ode=theta,
+                    tolerance=1e-5, use_trust_gate=True,
+                )
 
-        logger.info(
-            "P=%d | iters=%d | time=%.2fms | speedup=%.2fx | err=%.2e",
-            n_slabs, result.n_iterations, elapsed,
-            serial_time / elapsed if elapsed > 0 else 0, endpoint_err,
-        )
+            result, elapsed = _timed_call(_parareal_run, DEVICE, n_runs=1)
+
+            endpoint_err = torch.max(
+                torch.abs(result.y[-1].cpu() - serial_result.y[-1].cpu())
+            ).item()
+
+            results.append({
+                "system": system_name,
+                "n_slabs": n_slabs,
+                "iterations": result.n_iterations,
+                "time_ms": round(elapsed, 2),
+                "serial_time_ms": round(serial_time, 2),
+                "speedup": round(serial_time / elapsed, 2) if elapsed > 0 else 0,
+                "endpoint_error": endpoint_err,
+            })
+
+            logger.info(
+                "P=%d | iters=%d | time=%.2fms | speedup=%.2fx | err=%.2e",
+                n_slabs, result.n_iterations, elapsed,
+                serial_time / elapsed if elapsed > 0 else 0, endpoint_err,
+            )
 
     return pd.DataFrame(results)
 
@@ -297,75 +302,79 @@ def benchmark_parareal_hard():
     logger.info("BENCHMARK: Parareal HARD (fine_dt=0.001, device=%s)", DEVICE)
     logger.info("=" * 60)
 
-    system = get_system("damped_oscillator")
-
-    # Load pre-trained coarse propagator (trained via train_all.py)
-    model = _load_coarse_model(system, device=DEVICE)
-
-    y0_cpu = system.default_initial_condition()
-    y0_gpu = y0_cpu.to(DEVICE)
-    params = system.default_params()
-    theta = system.param_vector(params, device=DEVICE)
-
     fine_dt = 0.001  # 10× finer → 10× more serial work
-
     slab_counts = [2, 4, 8, 16]
     results = []
 
-    # Serial reference on CPU (sequential RK4)
-    cpu_solver = ClassicalRK4Solver(device=torch.device("cpu"))
+    for system_name in SYSTEM_REGISTRY:
+        logger.info("-" * 40)
+        logger.info("System: %s", system_name)
+        
+        system = get_system(system_name)
 
-    def _serial_run():
-        return cpu_solver.solve_single(
-            f=system.f, y0=y0_cpu, t_span=system.default_time_span(),
-            dt=fine_dt, params=params,
-        )
+        # Load pre-trained coarse propagator
+        model = _load_coarse_model(system, device=DEVICE)
 
-    serial_result, serial_time = _timed_call(_serial_run, torch.device("cpu"))
-    logger.info(
-        "Serial RK4 baseline: %.2fms (CPU, dt=%.4f, steps=%d)",
-        serial_time, fine_dt,
-        int((system.default_time_span()[1] - system.default_time_span()[0]) / fine_dt),
-    )
+        y0_cpu = system.default_initial_condition()
+        y0_gpu = y0_cpu.to(DEVICE)
+        params = system.default_params()
+        theta = system.param_vector(params, device=DEVICE)
 
-    for n_slabs in slab_counts:
-        parareal = PararealSolver(
-            coarse_net=model, device=DEVICE,
-            trust_gate=TrustGate(initial_threshold=0.1),
-            max_iterations=50,
-            system_name="damped_oscillator",
-            n_workers=N_WORKERS,
-        )
+        # Serial reference on CPU (sequential RK4)
+        cpu_solver = ClassicalRK4Solver(device=torch.device("cpu"))
 
-        def _parareal_run():
-            return parareal.solve(
-                f=system.f, y0=y0_gpu, t_span=system.default_time_span(),
-                n_slabs=n_slabs, fine_dt=fine_dt,
-                params=params, theta_ode=theta,
-                tolerance=1e-6, use_trust_gate=True,
+        def _serial_run():
+            return cpu_solver.solve_single(
+                f=system.f, y0=y0_cpu, t_span=system.default_time_span(),
+                dt=fine_dt, params=params,
             )
 
-        result, elapsed = _timed_call(_parareal_run, DEVICE, n_runs=1)
-
-        # Error vs serial: move GPU result to CPU for comparison
-        endpoint_err = torch.max(
-            torch.abs(result.y[-1].cpu() - serial_result.y[-1].cpu())
-        ).item()
-
-        results.append({
-            "n_slabs": n_slabs,
-            "iterations": result.n_iterations,
-            "time_ms": round(elapsed, 2),
-            "serial_time_ms": round(serial_time, 2),
-            "speedup": round(serial_time / elapsed, 2) if elapsed > 0 else 0,
-            "endpoint_error": endpoint_err,
-        })
-
+        serial_result, serial_time = _timed_call(_serial_run, torch.device("cpu"))
         logger.info(
-            "P=%d | iters=%d | time=%.2fms | speedup=%.2fx | err=%.2e",
-            n_slabs, result.n_iterations, elapsed,
-            serial_time / elapsed if elapsed > 0 else 0, endpoint_err,
+            "Serial RK4 baseline: %.2fms (CPU, dt=%.4f, steps=%d)",
+            serial_time, fine_dt,
+            int((system.default_time_span()[1] - system.default_time_span()[0]) / fine_dt),
         )
+
+        for n_slabs in slab_counts:
+            parareal = PararealSolver(
+                coarse_net=model, device=DEVICE,
+                trust_gate=TrustGate(lock_threshold=1e-5, lock_patience=1),
+                max_iterations=50,
+                system_name=system_name,
+                n_workers=N_WORKERS,
+                coarse_dt=0.01,
+            )
+
+            def _parareal_run():
+                return parareal.solve(
+                    f=system.f, y0=y0_gpu, t_span=system.default_time_span(),
+                    n_slabs=n_slabs, fine_dt=fine_dt,
+                    params=params, theta_ode=theta,
+                    tolerance=1e-6, use_trust_gate=True,
+                )
+
+            result, elapsed = _timed_call(_parareal_run, DEVICE, n_runs=1)
+
+            endpoint_err = torch.max(
+                torch.abs(result.y[-1].cpu() - serial_result.y[-1].cpu())
+            ).item()
+
+            results.append({
+                "system": system_name,
+                "n_slabs": n_slabs,
+                "iterations": result.n_iterations,
+                "time_ms": round(elapsed, 2),
+                "serial_time_ms": round(serial_time, 2),
+                "speedup": round(serial_time / elapsed, 2) if elapsed > 0 else 0,
+                "endpoint_error": endpoint_err,
+            })
+
+            logger.info(
+                "P=%d | iters=%d | time=%.2fms | speedup=%.2fx | err=%.2e",
+                n_slabs, result.n_iterations, elapsed,
+                serial_time / elapsed if elapsed > 0 else 0, endpoint_err,
+            )
 
     return pd.DataFrame(results)
 
