@@ -17,10 +17,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
+
+# Ensure the 'final' directory is in sys.path to resolve 'src' imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 import torch
 
