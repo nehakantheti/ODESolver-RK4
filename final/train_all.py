@@ -41,7 +41,7 @@ def main():
     )
     parser.add_argument("--epochs", type=int, default=5000, help="Number of epochs")
     parser.add_argument("--hidden-dim", type=int, default=128, help="Hidden dimension size")
-    parser.add_argument("--coarse-dt", type=float, default=0.01, help="Base coarse dt")
+    parser.add_argument("--coarse-dt", type=float, default=0.1, help="Base coarse dt")
     args = parser.parse_args()
 
     # Determine systems to train
@@ -62,8 +62,8 @@ def main():
         system = get_system(sys_name)
         trainer = CoarseTrainer(system, device=device)
 
-        # Train with high-resolution parameters
-        # randomize_dt=True and coarse_dt=0.01 will sample dt in [0.005, 0.02]
+        # Train with optimal Phase 11 parameters
+        # randomize_dt=True and coarse_dt=0.1 will sample dt in [0.05, 0.2]
         model, history = trainer.train(
             n_trajectories=300,        # Lots of data for accuracy
             epochs=args.epochs,
