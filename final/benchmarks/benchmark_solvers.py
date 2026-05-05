@@ -249,7 +249,7 @@ def benchmark_parareal_slabs():
                 max_iterations=30,
                 system_name=system_name,
                 n_workers=N_WORKERS,
-                coarse_dt=0.01,
+                coarse_dt=0.1,
             )
 
             def _parareal_run():
@@ -343,7 +343,7 @@ def benchmark_parareal_hard():
                 max_iterations=50,
                 system_name=system_name,
                 n_workers=N_WORKERS,
-                coarse_dt=0.01,
+                coarse_dt=0.1,
             )
 
             def _parareal_run():
