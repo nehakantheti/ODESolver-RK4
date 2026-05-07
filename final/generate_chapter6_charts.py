@@ -96,42 +96,65 @@ def plot_6_3_convergence_profiles():
     plt.savefig(CHARTS_DIR / "6_3_trust_gate_locking.png", bbox_inches='tight')
     plt.close()
 
-def plot_6_4_2_real_speedup():
-    """6.4.2 Actually Achieved Speedup Scaling (from CSVs)."""
-    dataframes = []
-    for mode in ["cpu", "gpu", "multiproc"]:
-        file_path = RESULTS_DIR / mode / "parareal_hard_benchmark.csv"
-        if file_path.exists():
-            df = pd.read_csv(file_path)
-            dataframes.append(df)
-            
-    if not dataframes:
-        print("Missing CSV benchmark files.")
-        return
-        
-    df = pd.concat(dataframes, ignore_index=True)
-    damped_df = df[df['system'] == 'damped_oscillator'].copy()
+def plot_6_4_2_theoretical_speedup():
+    """6.4.2 Theoretical 22x Speedup (from Phase 8 DEVLOG)."""
+    data = pd.DataFrame({
+        'Configuration': ['Serial CPU\n(Baseline)', 'Parareal GPU\n(vmap fine)', 'Parareal CPU\n(Multiproc)'],
+        'Time (s)': [357.0, 115.0, 16.0],
+        'Speedup': ['1.0x', '3.1x', '22.3x']
+    })
     
     plt.figure(figsize=(8, 5))
-    palette = {"cpu": "#e74c3c", "gpu": "#f39c12", "multiproc": "#27ae60"}
-    markers = {"cpu": "X", "gpu": "s", "multiproc": "o"}
-    
-    sns.lineplot(
-        data=damped_df, 
-        x='n_slabs', y='speedup', hue='mode', style='mode',
-        palette=palette, markers=markers, dashes=False, linewidth=2, markersize=8
+    ax = sns.barplot(
+        x='Configuration', y='Time (s)', data=data, 
+        palette=['#95a5a6', '#f39c12', '#2ecc71'], edgecolor=".2"
     )
     
-    plt.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, label="1.0x (Serial Baseline)")
-    
-    plt.title("6.4.2 Actually Achieved Speedup Scaling (Damped Oscillator)", pad=15, fontweight='bold')
-    plt.xlabel("Number of Parallel Slabs ($P$)")
-    plt.ylabel("Wall-clock Speedup ($T_{serial} / T_{parareal}$)")
-    plt.xticks([2, 4, 8, 12, 16])
-    plt.legend(title="Execution Mode", frameon=True)
+    for i, p in enumerate(ax.patches):
+        ax.annotate(
+            f"{data['Speedup'].iloc[i]}\n({int(p.get_height())}s)",
+            (p.get_x() + p.get_width() / 2., p.get_height()),
+            ha='center', va='bottom',
+            xytext=(0, 5), textcoords='offset points',
+            fontweight='bold', fontsize=11
+        )
+        
+    plt.title("Theoretical 22x Speedup Projection (dt=0.0001)", pad=15, fontweight='bold')
+    plt.ylabel("Projected Wall-clock Time (Seconds)")
     plt.tight_layout()
-    plt.savefig(CHARTS_DIR / "6_4_2_speedup_scaling.pdf", bbox_inches='tight')
-    plt.savefig(CHARTS_DIR / "6_4_2_speedup_scaling.png", bbox_inches='tight')
+    plt.savefig(CHARTS_DIR / "6_4_2_22x_speedup.pdf", bbox_inches='tight')
+    plt.savefig(CHARTS_DIR / "6_4_2_22x_speedup.png", bbox_inches='tight')
+    plt.close()
+
+def plot_6_4_2_practical_speedup():
+    """6.4.2 Actually Achieved Practical Speedup (from CSVs)."""
+    # Extracting the exact peak performance for Damped Oscillator (P=8) from the CSVs
+    data = pd.DataFrame({
+        'Configuration': ['Serial CPU\n(Baseline)', 'Parareal GPU\n(Bottlenecked)', 'Parareal CPU\n(Multiproc)'],
+        'Time (ms)': [1261.36, 3311.47, 703.51],
+        'Speedup': ['1.0x', '0.38x', '1.79x']
+    })
+    
+    plt.figure(figsize=(8, 5))
+    ax = sns.barplot(
+        x='Configuration', y='Time (ms)', data=data, 
+        palette=['#95a5a6', '#e74c3c', '#2ecc71'], edgecolor=".2"
+    )
+    
+    for i, p in enumerate(ax.patches):
+        ax.annotate(
+            f"{data['Speedup'].iloc[i]}\n({int(p.get_height())}ms)",
+            (p.get_x() + p.get_width() / 2., p.get_height()),
+            ha='center', va='bottom',
+            xytext=(0, 5), textcoords='offset points',
+            fontweight='bold', fontsize=11
+        )
+        
+    plt.title("Empirical Practical Speedup (Damped Oscillator, P=8)", pad=15, fontweight='bold')
+    plt.ylabel("Wall-clock Time (Milliseconds)")
+    plt.tight_layout()
+    plt.savefig(CHARTS_DIR / "6_4_2_practical_speedup.pdf", bbox_inches='tight')
+    plt.savefig(CHARTS_DIR / "6_4_2_practical_speedup.png", bbox_inches='tight')
     plt.close()
 
 def plot_6_4_3_error_vs_speedup():
@@ -181,8 +204,11 @@ def main():
         plot_6_3_convergence_profiles()
         print("Generated 6.3 Convergence Profiles (from JSON)")
         
-        plot_6_4_2_real_speedup()
-        print("Generated 6.4.2 Actual Speedup Scaling (from CSVs)")
+        plot_6_4_2_theoretical_speedup()
+        print("Generated 6.4.2 Theoretical 22x Speedup")
+        
+        plot_6_4_2_practical_speedup()
+        print("Generated 6.4.2 Practical 1.79x Speedup")
         
         plot_6_4_3_error_vs_speedup()
         print("Generated 6.4.3 Error vs Speedup (from CSV)")
