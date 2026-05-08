@@ -1,0 +1,249 @@
+// Coarse_Propagator
+digraph {
+	nodesep=0.1 rankdir=LR ranksep=1.5 splines=line
+	node [fixedsize=true label="" shape=circle style=solid width=0.3]
+	subgraph cluster_0 {
+		color=white fontname=Arial label="Input
+(D+1+P)"
+		L0_N0
+		L0_N1
+		L0_N2
+		L0_N3
+		L0_N4
+	}
+	subgraph cluster_1 {
+		color=white fontname=Arial label="Hidden 1
+(128 Units)"
+		L1_N0
+		L1_N1
+		L1_N2
+		L1_N3
+		L1_N4
+		L1_N5
+		L1_N6
+		L1_N7
+	}
+	subgraph cluster_2 {
+		color=white fontname=Arial label="Hidden 2
+(128 Units)"
+		L2_N0
+		L2_N1
+		L2_N2
+		L2_N3
+		L2_N4
+		L2_N5
+		L2_N6
+		L2_N7
+	}
+	subgraph cluster_3 {
+		color=white fontname=Arial label="Hidden 3
+(128 Units)"
+		L3_N0
+		L3_N1
+		L3_N2
+		L3_N3
+		L3_N4
+		L3_N5
+		L3_N6
+		L3_N7
+	}
+	subgraph cluster_4 {
+		color=white fontname=Arial label="Output
+f-hat"
+		L4_N0
+		L4_N1
+		L4_N2
+	}
+	L0_N0 -> L1_N0 [color=gray70 penwidth=0.5]
+	L0_N0 -> L1_N1 [color=gray70 penwidth=0.5]
+	L0_N0 -> L1_N2 [color=gray70 penwidth=0.5]
+	L0_N0 -> L1_N3 [color=gray70 penwidth=0.5]
+	L0_N0 -> L1_N4 [color=gray70 penwidth=0.5]
+	L0_N0 -> L1_N5 [color=gray70 penwidth=0.5]
+	L0_N0 -> L1_N6 [color=gray70 penwidth=0.5]
+	L0_N0 -> L1_N7 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N0 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N1 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N2 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N3 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N4 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N5 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N6 [color=gray70 penwidth=0.5]
+	L0_N1 -> L1_N7 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N0 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N1 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N2 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N3 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N4 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N5 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N6 [color=gray70 penwidth=0.5]
+	L0_N2 -> L1_N7 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N0 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N1 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N2 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N3 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N4 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N5 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N6 [color=gray70 penwidth=0.5]
+	L0_N3 -> L1_N7 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N0 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N1 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N2 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N3 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N4 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N5 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N6 [color=gray70 penwidth=0.5]
+	L0_N4 -> L1_N7 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N0 -> L2_N7 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N1 -> L2_N7 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N2 -> L2_N7 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N3 -> L2_N7 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N4 -> L2_N7 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N5 -> L2_N7 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N6 -> L2_N7 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N0 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N1 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N2 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N3 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N4 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N5 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N6 [color=gray70 penwidth=0.5]
+	L1_N7 -> L2_N7 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N0 -> L3_N7 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N1 -> L3_N7 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N2 -> L3_N7 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N3 -> L3_N7 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N4 -> L3_N7 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N5 -> L3_N7 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N6 -> L3_N7 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N0 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N1 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N2 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N3 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N4 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N5 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N6 [color=gray70 penwidth=0.5]
+	L2_N7 -> L3_N7 [color=gray70 penwidth=0.5]
+	L3_N0 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N0 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N0 -> L4_N2 [color=gray70 penwidth=0.5]
+	L3_N1 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N1 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N1 -> L4_N2 [color=gray70 penwidth=0.5]
+	L3_N2 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N2 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N2 -> L4_N2 [color=gray70 penwidth=0.5]
+	L3_N3 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N3 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N3 -> L4_N2 [color=gray70 penwidth=0.5]
+	L3_N4 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N4 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N4 -> L4_N2 [color=gray70 penwidth=0.5]
+	L3_N5 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N5 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N5 -> L4_N2 [color=gray70 penwidth=0.5]
+	L3_N6 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N6 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N6 -> L4_N2 [color=gray70 penwidth=0.5]
+	L3_N7 -> L4_N0 [color=gray70 penwidth=0.5]
+	L3_N7 -> L4_N1 [color=gray70 penwidth=0.5]
+	L3_N7 -> L4_N2 [color=gray70 penwidth=0.5]
+}
